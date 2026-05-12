@@ -11,9 +11,8 @@ struct OutputTriangle
     int cellID;
 };
 
-// DX12 optimal limits
-#define MAX_FACES 14
-#define MAX_VERTS 10
+#define MAX_FACES 24
+#define MAX_VERTS 24
 
 StructuredBuffer<float3> _Seeds;
 AppendStructuredBuffer<OutputTriangle> _OutputTriangles;
@@ -22,7 +21,8 @@ uint _SeedCount;
 float3 _BoxMin;
 float3 _BoxMax;
 
-[numthreads(64, 1, 1)]
+// REDUCED thread count. This gives each thread 8x more physical memory!
+[numthreads(8, 1, 1)]
 void GenerateVoronoiGeometry(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= _SeedCount)

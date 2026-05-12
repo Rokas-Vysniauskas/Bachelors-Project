@@ -86,8 +86,8 @@ public class VoronoiDestruction : MonoBehaviour
             seeds[i] = Vector3.Lerp(randomPoint, localImpactPoint, Random.Range(0f, impactBias));
         }
 
-        // 14 faces * 8 triangles per face (since 10 verts = 8 triangles)
-        int maxTriangles = pieceCount * 14 * 8;
+        // 24 faces * 22 triangles per face (since 24 verts = 22 triangles)
+        int maxTriangles = pieceCount * 24 * 22;
 
         ComputeBuffer seedBuffer = new ComputeBuffer(pieceCount, sizeof(float) * 3);
         seedBuffer.SetData(seeds);
@@ -106,7 +106,8 @@ public class VoronoiDestruction : MonoBehaviour
         voronoiCompute.SetVector("_BoxMin", localBounds.min);
         voronoiCompute.SetVector("_BoxMax", localBounds.max);
 
-        int threadGroups = Mathf.CeilToInt(pieceCount / 64f);
+        // Divide by 8f instead of 64f to match the new [numthreads(8, 1, 1)]
+        int threadGroups = Mathf.CeilToInt(pieceCount / 8f);
         voronoiCompute.Dispatch(kernel, threadGroups, 1, 1);
 
         UnityEngine.Rendering.AsyncGPUReadback.Request(triangleBuffer, request =>
