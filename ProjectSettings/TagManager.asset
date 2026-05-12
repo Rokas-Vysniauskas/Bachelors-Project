@@ -5,6 +5,7 @@ TagManager:
   serializedVersion: 3
   tags:
   - Destructible
+  - Cannonball
   layers:
   - Default
   - TransparentFX

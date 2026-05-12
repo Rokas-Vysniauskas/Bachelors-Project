@@ -505,6 +505,10 @@ PrefabInstance:
     m_TransformParent: {fileID: 0}
     m_Modifications:
     - target: {fileID: 4451612990180345884, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
+      propertyPath: m_Enabled
+      value: 0
+      objectReference: {fileID: 0}
+    - target: {fileID: 4451612990180345884, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
       propertyPath: voronoiSiteCount
       value: 225
       objectReference: {fileID: 0}
@@ -574,15 +578,17 @@ MonoBehaviour:
   m_GameObject: {fileID: 2389465832760258192}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 2355f55b30e51ea40bcd7bcf28d92f9b, type: 3}
+  m_Script: {fileID: 11500000, guid: 58c50cbdf7297ef44aa1d88c120fd5b2, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::DestructibleWallVoronoi
-  voronoiSiteCount: 225
+  m_EditorClassIdentifier: Assembly-CSharp::VoronoiDestruction
+  voronoiCompute: {fileID: 7200000, guid: a58d7eaa19e1ed640af58a6d9b5a0495, type: 3}
+  pieceCount: 225
   impactBias: 1
   explosionForce: 100
   explosionRadius: 1
-  surfaceMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
-  interiorMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
+  outsideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
+  insideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
+  projectileTag: Cannonball
 --- !u!1001 &8020139810614280795
 PrefabInstance:
   m_ObjectHideFlags: 0
