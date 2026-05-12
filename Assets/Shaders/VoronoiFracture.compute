@@ -11,7 +11,7 @@ struct OutputTriangle
     int cellID;
 };
 
-// The highest stable limit for high-density shattering
+// High-Density Limits
 #define MAX_FACES 30
 #define MAX_VERTS 20
 
@@ -22,7 +22,6 @@ uint _SeedCount;
 float3 _BoxMin;
 float3 _BoxMax;
 
-// Dropping to 1 thread gives this calculation absolute maximum hardware memory
 [numthreads(1, 1, 1)]
 void GenerateVoronoiGeometry(uint3 id : SV_DispatchThreadID)
 {
@@ -101,6 +100,35 @@ void GenerateVoronoiGeometry(uint3 id : SV_DispatchThreadID)
             continue;
 
         float3 otherSeed = _Seeds[seedIdx];
+
+        // ------------------------------------------------------------------
+        // THE FIX: BOUNDING SPHERE CULLING
+        // ------------------------------------------------------------------
+        // Find the absolute furthest corner of our shard right now
+        float maxRadius = 0;
+        for (int rF = 0; rF < MAX_FACES; rF++)
+        {
+            if (rF >= faceCount)
+                break;
+            for (int rV = 0; rV < MAX_VERTS; rV++)
+            {
+                if (rV >= faces_vertCount[rF])
+                    break;
+                float d = distance(mySeed, faces_verts[rF][rV]);
+                if (d > maxRadius)
+                    maxRadius = d;
+            }
+        }
+
+        // The cutting plane is exactly halfway between us and the other seed.
+        // If the plane is further away than our furthest corner, it physically CANNOT touch us.
+        // We skip all the math and save the memory!
+        if (distance(mySeed, otherSeed) * 0.5f > maxRadius + 0.001f)
+        {
+            continue;
+        }
+        // ------------------------------------------------------------------
+
         float3 planeNormal = normalize(mySeed - otherSeed);
         float3 planeCenter = (mySeed + otherSeed) * 0.5f;
 
