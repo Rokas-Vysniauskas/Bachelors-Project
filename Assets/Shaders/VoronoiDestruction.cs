@@ -12,7 +12,7 @@ public class VoronoiDestruction : MonoBehaviour
     public ComputeShader voronoiCompute;
 
     [Header("Destruction Settings")]
-    public int pieceCount = 40;
+    public int pieceCount = 225;
     [Range(0f, 1f)] public float impactBias = 0.8f;
     public float explosionForce = 600f;
     public float explosionRadius = 4f;
@@ -86,7 +86,7 @@ public class VoronoiDestruction : MonoBehaviour
             seeds[i] = Vector3.Lerp(randomPoint, localImpactPoint, Random.Range(0f, impactBias));
         }
 
-        // Updated for 30 Faces and 14 Triangles (16 Verts)
+        // Matches our stable 30 Faces / 16 Verts (14 Triangles) limit
         int maxTriangles = pieceCount * 30 * 14;
 
         ComputeBuffer seedBuffer = new ComputeBuffer(pieceCount, sizeof(float) * 3);
@@ -106,10 +106,7 @@ public class VoronoiDestruction : MonoBehaviour
         voronoiCompute.SetVector("_BoxMin", localBounds.min);
         voronoiCompute.SetVector("_BoxMax", localBounds.max);
 
-        //int threadGroups = Mathf.CeilToInt(pieceCount / 8f);
-        //voronoiCompute.Dispatch(kernel, threadGroups, 1, 1);
-
-        // Since numthreads is (1,1,1), we just dispatch exactly the pieceCount!
+        // 1 Thread per piece
         voronoiCompute.Dispatch(kernel, pieceCount, 1, 1);
 
         UnityEngine.Rendering.AsyncGPUReadback.Request(triangleBuffer, request =>
@@ -134,9 +131,7 @@ public class VoronoiDestruction : MonoBehaviour
 
     private void BuildDualMeshChunks(OutputTriangle[] gpuTriangles, Vector3 worldImpactPoint)
     {
-        // --- THE FIX: GLOBAL ZIPPER ---
-        // This scans ALL triangles before they are separated into shards.
-        // It forces drifting GPU float vertices to snap to the exact same mathematical value.
+        // 0.1mm Global Zipper (Snaps drifting corners without crushing the 225 dense shards)
         Dictionary<Vector3, Vector3> globalZipper = new Dictionary<Vector3, Vector3>();
         for (int i = 0; i < gpuTriangles.Length; i++)
         {
@@ -186,9 +181,8 @@ public class VoronoiDestruction : MonoBehaviour
                 Vector3 lv1 = t.v1 - centerOfMass;
                 Vector3 lv2 = t.v2 - centerOfMass;
 
-                Vector3 cross = Vector3.Cross(lv1 - lv0, lv2 - lv0);
-                if (cross.sqrMagnitude < 0.000001f) continue;
-                Vector3 flatNormal = cross.normalized;
+                // THE FIX: The rogue deletion line is GONE. We trust the GPU normal implicitly.
+                Vector3 flatNormal = t.normal;
 
                 Vector3 faceCenter = (lv0 + lv1 + lv2) / 3f;
                 bool isFlipped = Vector3.Dot(flatNormal, faceCenter) < 0;
@@ -224,6 +218,7 @@ public class VoronoiDestruction : MonoBehaviour
                 }
             }
 
+            // PhysX Dust Filter
             if (colVerts.Count < 4) continue;
 
             Mesh visMesh = new Mesh();
@@ -262,21 +257,16 @@ public class VoronoiDestruction : MonoBehaviour
         Destroy(gameObject, 2f);
     }
 
-    // Snaps drifting global float coordinates to a grid.
-    // The first shard to claim a coordinate dictates the exact float position for all neighbors!
+    // High Precision 0.1mm Welding functions to protect dense shattering
     private Vector3 GlobalWeld(Vector3 v, Dictionary<Vector3, Vector3> map)
     {
-        // 0.2mm precision ensures we only catch true float drift, not tiny geometry details
         Vector3 rounded = new Vector3(
-            Mathf.Round(v.x * 5000f) / 5000f,
-            Mathf.Round(v.y * 5000f) / 5000f,
-            Mathf.Round(v.z * 5000f) / 5000f
+            Mathf.Round(v.x * 10000f) / 10000f,
+            Mathf.Round(v.y * 10000f) / 10000f,
+            Mathf.Round(v.z * 10000f) / 10000f
         );
 
-        if (map.TryGetValue(rounded, out Vector3 truePos))
-        {
-            return truePos;
-        }
+        if (map.TryGetValue(rounded, out Vector3 truePos)) return truePos;
 
         map[rounded] = v;
         return v;
@@ -285,9 +275,9 @@ public class VoronoiDestruction : MonoBehaviour
     private int GetOrAddVisVert(Vector3 v, Vector3 n, Vector2 uv, List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, Dictionary<(Vector3, Vector3), int> map)
     {
         Vector3 roundedV = new Vector3(
-            Mathf.Round(v.x * 1000f) / 1000f,
-            Mathf.Round(v.y * 1000f) / 1000f,
-            Mathf.Round(v.z * 1000f) / 1000f
+            Mathf.Round(v.x * 10000f) / 10000f,
+            Mathf.Round(v.y * 10000f) / 10000f,
+            Mathf.Round(v.z * 10000f) / 10000f
         );
         Vector3 roundedN = new Vector3(
             Mathf.Round(n.x * 100f) / 100f,
@@ -309,9 +299,9 @@ public class VoronoiDestruction : MonoBehaviour
     private int GetOrAddColVert(Vector3 v, List<Vector3> verts, Dictionary<Vector3, int> map)
     {
         Vector3 rounded = new Vector3(
-            Mathf.Round(v.x * 100f) / 100f,
-            Mathf.Round(v.y * 100f) / 100f,
-            Mathf.Round(v.z * 100f) / 100f
+            Mathf.Round(v.x * 10000f) / 10000f,
+            Mathf.Round(v.y * 10000f) / 10000f,
+            Mathf.Round(v.z * 10000f) / 10000f
         );
         if (map.TryGetValue(rounded, out int idx)) return idx;
 
