@@ -13,7 +13,7 @@ struct OutputTriangle
 
 // High-Density Limits
 #define MAX_FACES 30
-#define MAX_VERTS 20
+#define MAX_VERTS 16
 
 StructuredBuffer<float3> _Seeds;
 AppendStructuredBuffer<OutputTriangle> _OutputTriangles;

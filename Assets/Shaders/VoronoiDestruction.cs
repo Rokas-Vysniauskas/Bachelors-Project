@@ -86,8 +86,8 @@ public class VoronoiDestruction : MonoBehaviour
             seeds[i] = Vector3.Lerp(randomPoint, localImpactPoint, Random.Range(0f, impactBias));
         }
 
-        // 30 faces * 18 triangles per face
-        int maxTriangles = pieceCount * 30 * 18;
+        // Updated for 30 Faces and 14 Triangles (16 Verts)
+        int maxTriangles = pieceCount * 30 * 14;
 
         ComputeBuffer seedBuffer = new ComputeBuffer(pieceCount, sizeof(float) * 3);
         seedBuffer.SetData(seeds);
