@@ -86,7 +86,7 @@ public class VoronoiDestruction : MonoBehaviour
             seeds[i] = Vector3.Lerp(randomPoint, localImpactPoint, Random.Range(0f, impactBias));
         }
 
-        // 24 faces * 22 triangles per face (since 24 verts = 22 triangles)
+        // Matches DX12 memory limits: 24 faces * 22 triangles (since 24 verts = 22 tris per face)
         int maxTriangles = pieceCount * 24 * 22;
 
         ComputeBuffer seedBuffer = new ComputeBuffer(pieceCount, sizeof(float) * 3);
@@ -106,7 +106,7 @@ public class VoronoiDestruction : MonoBehaviour
         voronoiCompute.SetVector("_BoxMin", localBounds.min);
         voronoiCompute.SetVector("_BoxMax", localBounds.max);
 
-        // Divide by 8f instead of 64f to match the new [numthreads(8, 1, 1)]
+        // Divide by 8 to match the [numthreads(8,1,1)] optimization
         int threadGroups = Mathf.CeilToInt(pieceCount / 8f);
         voronoiCompute.Dispatch(kernel, threadGroups, 1, 1);
 
@@ -159,8 +159,13 @@ public class VoronoiDestruction : MonoBehaviour
             List<int> visOutsideTris = new List<int>();
             List<int> visInsideTris = new List<int>();
 
+            // Visual Welding Map (Seals cracks, preserves flat normals)
+            Dictionary<(Vector3, Vector3), int> visWeldMap = new Dictionary<(Vector3, Vector3), int>();
+
             List<Vector3> colVerts = new List<Vector3>();
             List<int> colTris = new List<int>();
+
+            // Collision Welding Map (Aggressive speed optimization)
             Dictionary<Vector3, int> colWeldMap = new Dictionary<Vector3, int>();
 
             foreach (var t in tris)
@@ -169,36 +174,35 @@ public class VoronoiDestruction : MonoBehaviour
                 Vector3 lv1 = t.v1 - centerOfMass;
                 Vector3 lv2 = t.v2 - centerOfMass;
 
-                // 1. Calculate perfectly flat mathematical normal
                 Vector3 cross = Vector3.Cross(lv1 - lv0, lv2 - lv0);
                 if (cross.sqrMagnitude < 0.000001f) continue;
                 Vector3 flatNormal = cross.normalized;
 
-                // 2. Convex Hull Failsafe: Ensure normal ALWAYS faces away from center
                 Vector3 faceCenter = (lv0 + lv1 + lv2) / 3f;
                 bool isFlipped = Vector3.Dot(flatNormal, faceCenter) < 0;
 
-                if (isFlipped)
+                if (isFlipped) flatNormal = -flatNormal;
+
+                // Visual Mesh Assembly
+                int v0 = GetOrAddVisVert(lv0, flatNormal, new Vector2(lv0.x, lv0.y), visVerts, visNorms, visUvs, visWeldMap);
+                int v1 = GetOrAddVisVert(lv1, flatNormal, new Vector2(lv1.x, lv1.y), visVerts, visNorms, visUvs, visWeldMap);
+                int v2 = GetOrAddVisVert(lv2, flatNormal, new Vector2(lv2.x, lv2.y), visVerts, visNorms, visUvs, visWeldMap);
+
+                if (v0 != v1 && v1 != v2 && v0 != v2)
                 {
-                    flatNormal = -flatNormal;
+                    if (t.isExterior == 1)
+                    {
+                        if (isFlipped) visOutsideTris.AddRange(new int[] { v0, v2, v1 });
+                        else visOutsideTris.AddRange(new int[] { v0, v1, v2 });
+                    }
+                    else
+                    {
+                        if (isFlipped) visInsideTris.AddRange(new int[] { v0, v2, v1 });
+                        else visInsideTris.AddRange(new int[] { v0, v1, v2 });
+                    }
                 }
 
-                int vBase = visVerts.Count;
-                visVerts.Add(lv0); visVerts.Add(lv1); visVerts.Add(lv2);
-                visNorms.Add(flatNormal); visNorms.Add(flatNormal); visNorms.Add(flatNormal);
-                visUvs.Add(new Vector2(lv0.x, lv0.y)); visUvs.Add(new Vector2(lv1.x, lv1.y)); visUvs.Add(new Vector2(lv2.x, lv2.y));
-
-                if (t.isExterior == 1)
-                {
-                    if (isFlipped) visOutsideTris.AddRange(new int[] { vBase, vBase + 2, vBase + 1 });
-                    else visOutsideTris.AddRange(new int[] { vBase, vBase + 1, vBase + 2 });
-                }
-                else
-                {
-                    if (isFlipped) visInsideTris.AddRange(new int[] { vBase, vBase + 2, vBase + 1 });
-                    else visInsideTris.AddRange(new int[] { vBase, vBase + 1, vBase + 2 });
-                }
-
+                // Physics Mesh Assembly
                 int c0 = GetOrAddColVert(lv0, colVerts, colWeldMap);
                 int c1 = GetOrAddColVert(lv1, colVerts, colWeldMap);
                 int c2 = GetOrAddColVert(lv2, colVerts, colWeldMap);
@@ -209,6 +213,9 @@ public class VoronoiDestruction : MonoBehaviour
                     else colTris.AddRange(new int[] { c0, c1, c2 });
                 }
             }
+
+            // PhysX Dust Filter
+            if (colVerts.Count < 4) continue;
 
             Mesh visMesh = new Mesh();
             visMesh.vertices = visVerts.ToArray();
@@ -244,6 +251,30 @@ public class VoronoiDestruction : MonoBehaviour
         }
 
         Destroy(gameObject, 2f);
+    }
+
+    private int GetOrAddVisVert(Vector3 v, Vector3 n, Vector2 uv, List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, Dictionary<(Vector3, Vector3), int> map)
+    {
+        Vector3 roundedV = new Vector3(
+            Mathf.Round(v.x * 1000f) / 1000f,
+            Mathf.Round(v.y * 1000f) / 1000f,
+            Mathf.Round(v.z * 1000f) / 1000f
+        );
+        Vector3 roundedN = new Vector3(
+            Mathf.Round(n.x * 100f) / 100f,
+            Mathf.Round(n.y * 100f) / 100f,
+            Mathf.Round(n.z * 100f) / 100f
+        );
+
+        var key = (roundedV, roundedN);
+        if (map.TryGetValue(key, out int idx)) return idx;
+
+        idx = verts.Count;
+        verts.Add(v);
+        norms.Add(n);
+        uvs.Add(uv);
+        map[key] = idx;
+        return idx;
     }
 
     private int GetOrAddColVert(Vector3 v, List<Vector3> verts, Dictionary<Vector3, int> map)
