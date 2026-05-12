@@ -86,7 +86,8 @@ public class VoronoiDestruction : MonoBehaviour
             seeds[i] = Vector3.Lerp(randomPoint, localImpactPoint, Random.Range(0f, impactBias));
         }
 
-        int maxTriangles = pieceCount * 16 * 8;
+        // 14 faces * 8 triangles per face (since 10 verts = 8 triangles)
+        int maxTriangles = pieceCount * 14 * 8;
 
         ComputeBuffer seedBuffer = new ComputeBuffer(pieceCount, sizeof(float) * 3);
         seedBuffer.SetData(seeds);
@@ -147,7 +148,6 @@ public class VoronoiDestruction : MonoBehaviour
             List<OutputTriangle> tris = kvp.Value;
             if (tris.Count < 4) continue;
 
-            // Find true center of mass
             Vector3 centerOfMass = Vector3.zero;
             foreach (var t in tris) centerOfMass += t.v0 + t.v1 + t.v2;
             centerOfMass /= (tris.Count * 3);
@@ -164,24 +164,22 @@ public class VoronoiDestruction : MonoBehaviour
 
             foreach (var t in tris)
             {
-                // Local space shifting (centerOfMass becomes 0,0,0)
                 Vector3 lv0 = t.v0 - centerOfMass;
                 Vector3 lv1 = t.v1 - centerOfMass;
                 Vector3 lv2 = t.v2 - centerOfMass;
 
-                // --- THE FIX: BULLETPROOF NORMALS & WINDING ---
-                // 1. Calculate perfectly flat mathematical normal, ignore GPU normal
+                // 1. Calculate perfectly flat mathematical normal
                 Vector3 cross = Vector3.Cross(lv1 - lv0, lv2 - lv0);
-                if (cross.sqrMagnitude < 0.000001f) continue; // Skip zero-area microscopic slivers
+                if (cross.sqrMagnitude < 0.000001f) continue;
                 Vector3 flatNormal = cross.normalized;
 
-                // 2. Check if face is pointing inwards. (Dot product of face center and normal)
+                // 2. Convex Hull Failsafe: Ensure normal ALWAYS faces away from center
                 Vector3 faceCenter = (lv0 + lv1 + lv2) / 3f;
                 bool isFlipped = Vector3.Dot(flatNormal, faceCenter) < 0;
 
                 if (isFlipped)
                 {
-                    flatNormal = -flatNormal; // Correct the lighting normal
+                    flatNormal = -flatNormal;
                 }
 
                 int vBase = visVerts.Count;
@@ -189,7 +187,6 @@ public class VoronoiDestruction : MonoBehaviour
                 visNorms.Add(flatNormal); visNorms.Add(flatNormal); visNorms.Add(flatNormal);
                 visUvs.Add(new Vector2(lv0.x, lv0.y)); visUvs.Add(new Vector2(lv1.x, lv1.y)); visUvs.Add(new Vector2(lv2.x, lv2.y));
 
-                // 3. Assign triangles, dynamically reversing winding if the GPU handed it to us backwards
                 if (t.isExterior == 1)
                 {
                     if (isFlipped) visOutsideTris.AddRange(new int[] { vBase, vBase + 2, vBase + 1 });
@@ -201,7 +198,6 @@ public class VoronoiDestruction : MonoBehaviour
                     else visInsideTris.AddRange(new int[] { vBase, vBase + 1, vBase + 2 });
                 }
 
-                // Physics Mesh (Collision)
                 int c0 = GetOrAddColVert(lv0, colVerts, colWeldMap);
                 int c1 = GetOrAddColVert(lv1, colVerts, colWeldMap);
                 int c2 = GetOrAddColVert(lv2, colVerts, colWeldMap);
@@ -213,7 +209,6 @@ public class VoronoiDestruction : MonoBehaviour
                 }
             }
 
-            // Create Visual Mesh
             Mesh visMesh = new Mesh();
             visMesh.vertices = visVerts.ToArray();
             visMesh.normals = visNorms.ToArray();
@@ -223,12 +218,10 @@ public class VoronoiDestruction : MonoBehaviour
             visMesh.SetTriangles(visInsideTris, 1);
             visMesh.RecalculateBounds();
 
-            // Create Collision Mesh
             Mesh colMesh = new Mesh();
             colMesh.vertices = colVerts.ToArray();
             colMesh.triangles = colTris.ToArray();
 
-            // Instantiate Object
             GameObject chunkObj = new GameObject($"Shard_{kvp.Key}");
             chunkObj.transform.position = transform.TransformPoint(centerOfMass);
             chunkObj.transform.rotation = transform.rotation;
