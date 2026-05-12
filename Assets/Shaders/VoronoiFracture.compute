@@ -11,8 +11,9 @@ struct OutputTriangle
     int cellID;
 };
 
-#define MAX_FACES 24
-#define MAX_VERTS 24
+// The highest stable limit for high-density shattering
+#define MAX_FACES 30
+#define MAX_VERTS 20
 
 StructuredBuffer<float3> _Seeds;
 AppendStructuredBuffer<OutputTriangle> _OutputTriangles;
@@ -21,8 +22,8 @@ uint _SeedCount;
 float3 _BoxMin;
 float3 _BoxMax;
 
-// REDUCED thread count. This gives each thread 8x more physical memory!
-[numthreads(8, 1, 1)]
+// Dropping to 1 thread gives this calculation absolute maximum hardware memory
+[numthreads(1, 1, 1)]
 void GenerateVoronoiGeometry(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= _SeedCount)

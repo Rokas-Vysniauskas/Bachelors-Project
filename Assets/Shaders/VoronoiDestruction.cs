@@ -86,8 +86,8 @@ public class VoronoiDestruction : MonoBehaviour
             seeds[i] = Vector3.Lerp(randomPoint, localImpactPoint, Random.Range(0f, impactBias));
         }
 
-        // Matches DX12 memory limits: 24 faces * 22 triangles (since 24 verts = 22 tris per face)
-        int maxTriangles = pieceCount * 24 * 22;
+        // 30 faces * 18 triangles per face
+        int maxTriangles = pieceCount * 30 * 18;
 
         ComputeBuffer seedBuffer = new ComputeBuffer(pieceCount, sizeof(float) * 3);
         seedBuffer.SetData(seeds);
@@ -106,9 +106,11 @@ public class VoronoiDestruction : MonoBehaviour
         voronoiCompute.SetVector("_BoxMin", localBounds.min);
         voronoiCompute.SetVector("_BoxMax", localBounds.max);
 
-        // Divide by 8 to match the [numthreads(8,1,1)] optimization
-        int threadGroups = Mathf.CeilToInt(pieceCount / 8f);
-        voronoiCompute.Dispatch(kernel, threadGroups, 1, 1);
+        //int threadGroups = Mathf.CeilToInt(pieceCount / 8f);
+        //voronoiCompute.Dispatch(kernel, threadGroups, 1, 1);
+
+        // Since numthreads is (1,1,1), we just dispatch exactly the pieceCount!
+        voronoiCompute.Dispatch(kernel, pieceCount, 1, 1);
 
         UnityEngine.Rendering.AsyncGPUReadback.Request(triangleBuffer, request =>
         {
@@ -132,6 +134,19 @@ public class VoronoiDestruction : MonoBehaviour
 
     private void BuildDualMeshChunks(OutputTriangle[] gpuTriangles, Vector3 worldImpactPoint)
     {
+        // --- THE FIX: GLOBAL ZIPPER ---
+        // This scans ALL triangles before they are separated into shards.
+        // It forces drifting GPU float vertices to snap to the exact same mathematical value.
+        Dictionary<Vector3, Vector3> globalZipper = new Dictionary<Vector3, Vector3>();
+        for (int i = 0; i < gpuTriangles.Length; i++)
+        {
+            if (gpuTriangles[i].cellID == -1) continue;
+
+            gpuTriangles[i].v0 = GlobalWeld(gpuTriangles[i].v0, globalZipper);
+            gpuTriangles[i].v1 = GlobalWeld(gpuTriangles[i].v1, globalZipper);
+            gpuTriangles[i].v2 = GlobalWeld(gpuTriangles[i].v2, globalZipper);
+        }
+
         Dictionary<int, List<OutputTriangle>> chunks = new Dictionary<int, List<OutputTriangle>>();
         foreach (var tri in gpuTriangles)
         {
@@ -159,13 +174,10 @@ public class VoronoiDestruction : MonoBehaviour
             List<int> visOutsideTris = new List<int>();
             List<int> visInsideTris = new List<int>();
 
-            // Visual Welding Map (Seals cracks, preserves flat normals)
             Dictionary<(Vector3, Vector3), int> visWeldMap = new Dictionary<(Vector3, Vector3), int>();
 
             List<Vector3> colVerts = new List<Vector3>();
             List<int> colTris = new List<int>();
-
-            // Collision Welding Map (Aggressive speed optimization)
             Dictionary<Vector3, int> colWeldMap = new Dictionary<Vector3, int>();
 
             foreach (var t in tris)
@@ -183,7 +195,6 @@ public class VoronoiDestruction : MonoBehaviour
 
                 if (isFlipped) flatNormal = -flatNormal;
 
-                // Visual Mesh Assembly
                 int v0 = GetOrAddVisVert(lv0, flatNormal, new Vector2(lv0.x, lv0.y), visVerts, visNorms, visUvs, visWeldMap);
                 int v1 = GetOrAddVisVert(lv1, flatNormal, new Vector2(lv1.x, lv1.y), visVerts, visNorms, visUvs, visWeldMap);
                 int v2 = GetOrAddVisVert(lv2, flatNormal, new Vector2(lv2.x, lv2.y), visVerts, visNorms, visUvs, visWeldMap);
@@ -202,7 +213,6 @@ public class VoronoiDestruction : MonoBehaviour
                     }
                 }
 
-                // Physics Mesh Assembly
                 int c0 = GetOrAddColVert(lv0, colVerts, colWeldMap);
                 int c1 = GetOrAddColVert(lv1, colVerts, colWeldMap);
                 int c2 = GetOrAddColVert(lv2, colVerts, colWeldMap);
@@ -214,7 +224,6 @@ public class VoronoiDestruction : MonoBehaviour
                 }
             }
 
-            // PhysX Dust Filter
             if (colVerts.Count < 4) continue;
 
             Mesh visMesh = new Mesh();
@@ -251,6 +260,26 @@ public class VoronoiDestruction : MonoBehaviour
         }
 
         Destroy(gameObject, 2f);
+    }
+
+    // Snaps drifting global float coordinates to a grid.
+    // The first shard to claim a coordinate dictates the exact float position for all neighbors!
+    private Vector3 GlobalWeld(Vector3 v, Dictionary<Vector3, Vector3> map)
+    {
+        // 0.2mm precision ensures we only catch true float drift, not tiny geometry details
+        Vector3 rounded = new Vector3(
+            Mathf.Round(v.x * 5000f) / 5000f,
+            Mathf.Round(v.y * 5000f) / 5000f,
+            Mathf.Round(v.z * 5000f) / 5000f
+        );
+
+        if (map.TryGetValue(rounded, out Vector3 truePos))
+        {
+            return truePos;
+        }
+
+        map[rounded] = v;
+        return v;
     }
 
     private int GetOrAddVisVert(Vector3 v, Vector3 n, Vector2 uv, List<Vector3> verts, List<Vector3> norms, List<Vector2> uvs, Dictionary<(Vector3, Vector3), int> map)
