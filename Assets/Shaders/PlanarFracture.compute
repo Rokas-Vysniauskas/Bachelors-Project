@@ -1,0 +1,286 @@
+#pragma kernel GeneratePlanarGeometry
+#pragma target 5.0 
+
+struct OutputTriangle
+{
+    float3 v0;
+    float3 v1;
+    float3 v2;
+    float3 normal;
+    int isExterior;
+    int cellID;
+};
+
+struct ClipPlane
+{
+    float3 normal;
+    float distance; // dot(PointOnPlane, Normal)
+};
+
+struct FractureCell
+{
+    ClipPlane planes[8]; // Max 8 bounding planes per chunk
+    int planeCount;
+    float3 pad; // Memory alignment
+};
+
+#define MAX_FACES 30
+#define MAX_VERTS 16
+
+StructuredBuffer<FractureCell> _Cells;
+AppendStructuredBuffer<OutputTriangle> _OutputTriangles;
+
+uint _CellCount;
+float3 _BoxMin;
+float3 _BoxMax;
+
+[numthreads(1, 1, 1)]
+void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _CellCount)
+        return;
+
+    int cellID = (int) id.x;
+    FractureCell cell = _Cells[cellID];
+
+    int faceCount = 6;
+    float3 faces_verts[MAX_FACES][MAX_VERTS];
+    int faces_vertCount[MAX_FACES];
+    float3 faces_normal[MAX_FACES];
+    int faces_isSurface[MAX_FACES];
+    
+    // Initialize the solid bounding box
+    float3 v000 = float3(_BoxMin.x, _BoxMin.y, _BoxMin.z);
+    float3 v100 = float3(_BoxMax.x, _BoxMin.y, _BoxMin.z);
+    float3 v010 = float3(_BoxMin.x, _BoxMax.y, _BoxMin.z);
+    float3 v110 = float3(_BoxMax.x, _BoxMax.y, _BoxMin.z);
+    float3 v001 = float3(_BoxMin.x, _BoxMin.y, _BoxMax.z);
+    float3 v101 = float3(_BoxMax.x, _BoxMin.y, _BoxMax.z);
+    float3 v011 = float3(_BoxMin.x, _BoxMax.y, _BoxMax.z);
+    float3 v111 = float3(_BoxMax.x, _BoxMax.y, _BoxMax.z);
+
+    // Initial 6 faces (Wall exterior)
+    faces_vertCount[0] = 4;
+    faces_isSurface[0] = 1;
+    faces_normal[0] = float3(0, 0, -1);
+    faces_verts[0][0] = v010;
+    faces_verts[0][1] = v110;
+    faces_verts[0][2] = v100;
+    faces_verts[0][3] = v000;
+    
+    faces_vertCount[1] = 4;
+    faces_isSurface[1] = 1;
+    faces_normal[1] = float3(0, 0, 1);
+    faces_verts[1][0] = v111;
+    faces_verts[1][1] = v011;
+    faces_verts[1][2] = v001;
+    faces_verts[1][3] = v101;
+
+    faces_vertCount[2] = 4;
+    faces_isSurface[2] = 1;
+    faces_normal[2] = float3(0, 1, 0);
+    faces_verts[2][0] = v011;
+    faces_verts[2][1] = v111;
+    faces_verts[2][2] = v110;
+    faces_verts[2][3] = v010;
+    
+    faces_vertCount[3] = 4;
+    faces_isSurface[3] = 1;
+    faces_normal[3] = float3(0, -1, 0);
+    faces_verts[3][0] = v000;
+    faces_verts[3][1] = v100;
+    faces_verts[3][2] = v101;
+    faces_verts[3][3] = v001;
+    
+    faces_vertCount[4] = 4;
+    faces_isSurface[4] = 1;
+    faces_normal[4] = float3(1, 0, 0);
+    faces_verts[4][0] = v110;
+    faces_verts[4][1] = v111;
+    faces_verts[4][2] = v101;
+    faces_verts[4][3] = v100;
+    
+    faces_vertCount[5] = 4;
+    faces_isSurface[5] = 1;
+    faces_normal[5] = float3(-1, 0, 0);
+    faces_verts[5][0] = v011;
+    faces_verts[5][1] = v010;
+    faces_verts[5][2] = v000;
+    faces_verts[5][3] = v001;
+
+    // Apply Explicit Slicing Planes
+    for (int p = 0; p < cell.planeCount; p++)
+    {
+        float3 planeNormal = cell.planes[p].normal;
+        float planeDist = cell.planes[p].distance;
+
+        int nextFaceCount = 0;
+        float3 next_faces_verts[MAX_FACES][MAX_VERTS];
+        int next_faces_vertCount[MAX_FACES];
+        float3 next_faces_normal[MAX_FACES];
+        int next_faces_isSurface[MAX_FACES];
+        
+        float3 capPts[MAX_VERTS];
+        int capPtCount = 0;
+
+        for (int f = 0; f < MAX_FACES; f++)
+        {
+            if (f < faceCount)
+            {
+                int vCount = faces_vertCount[f];
+                float3 keptVerts[MAX_VERTS];
+                int keptCount = 0;
+                float3 lastAdded = float3(99999, 99999, 99999);
+
+                for (int v = 0; v < MAX_VERTS; v++)
+                {
+                    if (v < vCount)
+                    {
+                        float3 pA = faces_verts[f][v];
+                        int nextIdx = (v + 1 == vCount) ? 0 : v + 1;
+                        float3 pB = faces_verts[f][nextIdx];
+
+                        bool aInside = dot(pA, planeNormal) - planeDist >= -0.0001f;
+                        bool bInside = dot(pB, planeNormal) - planeDist >= -0.0001f;
+
+                        if (aInside)
+                        {
+                            if (keptCount < MAX_VERTS && distance(lastAdded, pA) > 0.0001f)
+                            {
+                                keptVerts[keptCount++] = pA;
+                                lastAdded = pA;
+                            }
+                        }
+
+                        if (aInside != bInside)
+                        {
+                            // Calculate intersection exactly like Voronoi
+                            float denom = dot(pB - pA, planeNormal);
+                            float t = (abs(denom) > 0.000001f) ? (planeDist - dot(pA, planeNormal)) / denom : 0.5f;
+                            float3 intersect = lerp(pA, pB, t);
+
+                            if (keptCount < MAX_VERTS && distance(lastAdded, intersect) > 0.0001f)
+                            {
+                                keptVerts[keptCount++] = intersect;
+                                lastAdded = intersect;
+                            }
+
+                            bool isDup = false;
+                            for (int c = 0; c < MAX_VERTS; c++)
+                            {
+                                if (c < capPtCount && distance(capPts[c], intersect) < 0.0001f)
+                                    isDup = true;
+                            }
+                            if (!isDup && capPtCount < MAX_VERTS)
+                            {
+                                capPts[capPtCount++] = intersect;
+                            }
+                        }
+                    }
+                }
+
+                if (keptCount >= 3 && nextFaceCount < MAX_FACES)
+                {
+                    next_faces_vertCount[nextFaceCount] = keptCount;
+                    next_faces_normal[nextFaceCount] = faces_normal[f];
+                    next_faces_isSurface[nextFaceCount] = faces_isSurface[f];
+                    
+                    for (int kv = 0; kv < MAX_VERTS; kv++)
+                    {
+                        if (kv < keptCount)
+                            next_faces_verts[nextFaceCount][kv] = keptVerts[kv];
+                    }
+                    nextFaceCount++;
+                }
+            }
+        }
+
+        // Cap the Hole using Voronoi Radial Sorting
+        if (capPtCount >= 3 && nextFaceCount < MAX_FACES)
+        {
+            float3 center = float3(0, 0, 0);
+            for (int c1 = 0; c1 < MAX_VERTS; c1++)
+            {
+                if (c1 < capPtCount)
+                    center += capPts[c1];
+            }
+            center /= (float) capPtCount;
+            
+            float3 right = normalize(capPts[0] - center);
+            float3 forward = normalize(cross(planeNormal, right));
+            
+            for (int sortI = 0; sortI < MAX_VERTS; sortI++)
+            {
+                for (int sortJ = 0; sortJ < MAX_VERTS; sortJ++)
+                {
+                    if (sortI < capPtCount - 1 && sortJ < capPtCount - sortI - 1)
+                    {
+                        float3 dirA = normalize(capPts[sortJ] - center);
+                        float3 dirB = normalize(capPts[sortJ + 1] - center);
+                        
+                        float angleA = atan2(dot(dirA, forward), dot(dirA, right));
+                        float angleB = atan2(dot(dirB, forward), dot(dirB, right));
+
+                        if (angleA < angleB)
+                        {
+                            float3 temp = capPts[sortJ];
+                            capPts[sortJ] = capPts[sortJ + 1];
+                            capPts[sortJ + 1] = temp;
+                        }
+                    }
+                }
+            }
+
+            next_faces_vertCount[nextFaceCount] = capPtCount;
+            next_faces_normal[nextFaceCount] = planeNormal;
+            next_faces_isSurface[nextFaceCount] = 0; // Mark as inside cut face
+            
+            for (int c2 = 0; c2 < MAX_VERTS; c2++)
+            {
+                if (c2 < capPtCount)
+                    next_faces_verts[nextFaceCount][c2] = capPts[c2];
+            }
+            nextFaceCount++;
+        }
+
+        faceCount = nextFaceCount;
+        for (int copyF = 0; copyF < MAX_FACES; copyF++)
+        {
+            if (copyF < faceCount)
+            {
+                faces_vertCount[copyF] = next_faces_vertCount[copyF];
+                faces_normal[copyF] = next_faces_normal[copyF];
+                faces_isSurface[copyF] = next_faces_isSurface[copyF];
+                
+                for (int copyV = 0; copyV < MAX_VERTS; copyV++)
+                {
+                    if (copyV < faces_vertCount[copyF])
+                        faces_verts[copyF][copyV] = next_faces_verts[copyF][copyV];
+                }
+            }
+        }
+    }
+
+    // Output Triangles
+    for (int tF = 0; tF < MAX_FACES; tF++)
+    {
+        if (tF < faceCount)
+        {
+            int vc = faces_vertCount[tF];
+            for (int tV = 1; tV < MAX_VERTS; tV++)
+            {
+                if (tV < vc - 1)
+                {
+                    OutputTriangle tri;
+                    tri.v0 = faces_verts[tF][0];
+                    tri.v1 = faces_verts[tF][tV];
+                    tri.v2 = faces_verts[tF][tV + 1];
+                    tri.normal = faces_normal[tF];
+                    tri.isExterior = faces_isSurface[tF];
+                    tri.cellID = cellID;
+                    _OutputTriangles.Append(tri);
+                }
+            }
+        }
+    }
+}

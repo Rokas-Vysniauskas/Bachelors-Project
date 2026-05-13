@@ -552,11 +552,46 @@ PrefabInstance:
       propertyPath: m_Name
       value: Wall_Mesh_Slicing
       objectReference: {fileID: 0}
-    m_RemovedComponents: []
+    - target: {fileID: 8756559172382686110, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
+      propertyPath: m_Constraints
+      value: 112
+      objectReference: {fileID: 0}
+    m_RemovedComponents:
+    - {fileID: -4629681650779346881, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
-    m_AddedComponents: []
+    m_AddedComponents:
+    - targetCorrespondingSourceObject: {fileID: 3452283401666420742, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
+      insertIndex: -1
+      addedObject: {fileID: 594822413508022864}
   m_SourcePrefab: {fileID: 100100000, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
+--- !u!1 &594822413508022863 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 3452283401666420742, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
+  m_PrefabInstance: {fileID: 594822413508022862}
+  m_PrefabAsset: {fileID: 0}
+--- !u!114 &594822413508022864
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 594822413508022863}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c78e5fa1a78c53448b49e88104a3ba91, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GPUMeshSlicer
+  planarCompute: {fileID: 7200000, guid: ef3fc1d4916f13e4a81b93bcbe1187ad, type: 3}
+  wallNormal: {x: 0, y: 0, z: 1}
+  impactRadius: 10
+  cylinderSlices: 6
+  radialSlices: 40
+  planeChaos: 1
+  explosionForce: 10
+  projectileTag: Cannonball
+  outsideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
+  insideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
 --- !u!1001 &8020139810614280795
 PrefabInstance:
   m_ObjectHideFlags: 0
