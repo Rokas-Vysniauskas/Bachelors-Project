@@ -14,7 +14,6 @@ struct Node
 
 RWStructuredBuffer<Node> _Nodes;
 
-// Simulation Variables
 float _DeltaTime;
 float _Stiffness;
 float _Damping;
@@ -22,14 +21,12 @@ float _YieldStress;
 int3 _GridResolution;
 float3 _NodeSpacing;
 
-// Impact Variables
 float3 _ImpactPoint;
 float3 _ImpactVelocity;
 float _ImpactRadius;
 float _ImpactMass;
 int _HasImpact;
 
-// Resolves 3D coordinate to 1D buffer index
 int GetIndex(int3 coord)
 {
     if (coord.x < 0 || coord.x >= _GridResolution.x ||
@@ -92,16 +89,22 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
             
             float displacement = currentDist - restDist;
             float3 forceDir = normalize(currentDir);
-            float3 springForce = forceDir * (displacement * _Stiffness);
             
-            totalForce += springForce;
+            totalForce += forceDir * (displacement * _Stiffness);
             localStress += abs(displacement);
         }
     }
 
     totalForce -= _Nodes[index].velocity * _Damping;
-    
     _Nodes[index].velocity += totalForce * _DeltaTime;
+    
+    // SAFETY CLAMP: Prevents explosive chain reactions in the lattice
+    float maxVel = 50.0;
+    if (length(_Nodes[index].velocity) > maxVel)
+    {
+        _Nodes[index].velocity = normalize(_Nodes[index].velocity) * maxVel;
+    }
+
     _Nodes[index].stress = localStress * _Stiffness;
 }
 

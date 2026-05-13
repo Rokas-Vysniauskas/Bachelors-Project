@@ -598,7 +598,7 @@ MonoBehaviour:
   nodeResolution: {x: 20, y: 20, z: 4}
   stiffness: 5000
   damping: 5
-  yieldStress: 150
+  yieldStress: 500
   impactForceMultiplier: 1
   projectileTag: Cannonball
 --- !u!1001 &8020139810614280795
