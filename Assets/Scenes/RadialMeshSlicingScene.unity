@@ -594,13 +594,14 @@ MonoBehaviour:
   wallNormal: {x: 0, y: 0, z: 1}
   impactRadius: 4
   focus: 2.5
-  cylinderSlices: 6
+  cylinderSlices: 8
   radialSlices: 40
+  coreSlices: 6
   planeChaos: 1
   extraCrossCuts: 2
   explosionForce: 0
   explosionRadius: 4
-  collisionShrink: 0.99
+  minShardMass: 2
   projectileTag: Cannonball
   outsideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
   insideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}

@@ -15,30 +15,35 @@ public class PlanarDestruction : MonoBehaviour
     public Vector3 wallNormal = Vector3.forward;
     public float impactRadius = 4f;
 
-    [Tooltip("Packs the cylindrical rings tighter near the center. 1 = linear, 3 = highly dense center.")]
-    [Range(1f, 5f)] public float focus = 2.5f;
+    [Tooltip("Packs the cylindrical rings tighter near the center.")]
+    [Range(1f, 3f)] public float focus = 1.5f;
 
-    public int cylinderSlices = 4;
-    public int radialSlices = 8;
+    public int cylinderSlices = 5;
 
-    [Tooltip("Randomness of the plane angles to break 2D symmetry.")]
-    [Range(0f, 1f)] public float planeChaos = 0.5f;
+    [Tooltip("Target radial slices for the OUTERMOST ring. The inner rings will scale down to a chunky core.")]
+    public int radialSlices = 40;
 
-    [Tooltip("Number of global 3D cuts that slice through the entire fracture zone. Utterly destroys spider-web shapes.")]
+    [Tooltip("Number of slices in the absolute center. Keep this at 3 or 4 to create a stable 'potato' core and prevent pizza-slice physics explosions.")]
+    public int coreSlices = 4;
+
+    [Tooltip("Randomizes angles and tilts to completely destroy symmetrical spider-web patterns.")]
+    [Range(0f, 1f)] public float planeChaos = 0.6f;
+
+    [Tooltip("Global 3D cuts that slice through the entire fracture zone to create wedge-shaped rubble.")]
     [Range(0, 3)] public int extraCrossCuts = 2;
 
     [Header("Physics Settings")]
-    public float explosionForce = 600f;
+    public float explosionForce = 150f;
     public float explosionRadius = 4f;
 
-    [Tooltip("Shrinks ONLY the physics collider to prevent the 'Pizza Slice' explosion without creating visual gaps.")]
-    [Range(0.8f, 0.99f)] public float collisionShrink = 0.95f;
-
+    [Tooltip("Prevents razor-thin shards from weighing too little and flying away like feathers from the explosion force.")]
+    public float minShardMass = 2.0f;
     public string projectileTag = "CannonBall";
 
     [Header("Materials")]
     public Material outsideMaterial;
     public Material insideMaterial;
+    [Tooltip("Apply a Zero-Bounce, High-Friction Physic Material here for realistic dead-weight concrete.")]
     public PhysicsMaterial rubblePhysicsMaterial;
 
     private bool isBroken = false;
@@ -136,66 +141,61 @@ public class PlanarDestruction : MonoBehaviour
         tangent = Vector3.Normalize(Vector3.Cross(wallNormal, tangent));
         Vector3 bitangent = Vector3.Cross(wallNormal, tangent);
 
-        ClipPlane[] spokes = new ClipPlane[radialSlices];
-        float angleStep = (Mathf.PI * 2f) / radialSlices;
-        for (int r = 0; r < radialSlices; r++)
-        {
-            float a = r * angleStep + Random.Range(-angleStep * 0.4f, angleStep * 0.4f) * planeChaos;
-            Vector3 dir = (tangent * Mathf.Cos(a)) + (bitangent * Mathf.Sin(a));
-            Vector3 normal = Vector3.Cross(wallNormal, dir).normalized;
-
-            float tilt = Random.Range(-45f, 45f) * planeChaos;
-            normal = Quaternion.AngleAxis(tilt, dir) * normal;
-
-            spokes[r] = new ClipPlane { normal = normal, distance = Vector3.Dot(impact, normal) };
-        }
-
-        ClipPlane[,] rings = new ClipPlane[cylinderSlices, radialSlices];
         float[] radii = new float[cylinderSlices];
-        for (int c = 1; c < cylinderSlices; c++)
+        for (int c = 0; c < cylinderSlices; c++)
         {
-            radii[c] = impactRadius * Mathf.Pow((float)c / cylinderSlices, focus);
-        }
-
-        for (int c = 1; c < cylinderSlices; c++)
-        {
-            for (int r = 0; r < radialSlices; r++)
-            {
-                float aMid = (r + 0.5f) * angleStep;
-                Vector3 dir = (tangent * Mathf.Cos(aMid)) + (bitangent * Mathf.Sin(aMid));
-                Vector3 pt = impact + dir * radii[c];
-
-                float tilt = Random.Range(-40f, 40f) * planeChaos;
-                Vector3 normal = Quaternion.AngleAxis(tilt, Vector3.Cross(dir, wallNormal)) * dir;
-
-                rings[c, r] = new ClipPlane { normal = normal, distance = Vector3.Dot(pt, normal) };
-            }
+            radii[c] = impactRadius * Mathf.Pow((float)(c + 1) / cylinderSlices, focus);
         }
 
         List<FractureCell> baseCells = new List<FractureCell>();
-        for (int c = 0; c < cylinderSlices; c++)
+
+        for (int c = 0; c <= cylinderSlices; c++)
         {
-            for (int r = 0; r < radialSlices; r++)
+            float rInner = (c == 0) ? 0f : radii[c - 1];
+            float rOuter = (c == cylinderSlices) ? 100000f : radii[c];
+
+            int currentRadialSlices = (c == 0) ? coreSlices : Mathf.Max(coreSlices, Mathf.RoundToInt(radialSlices * ((float)c / cylinderSlices)));
+            float angleStep = (Mathf.PI * 2f) / currentRadialSlices;
+
+            float ringAngleOffset = Random.Range(0f, Mathf.PI * 2f);
+
+            for (int r = 0; r < currentRadialSlices; r++)
             {
+                float aStart = ringAngleOffset + (r * angleStep);
+                float aEnd = ringAngleOffset + ((r + 1) * angleStep);
+
+                float jitter = angleStep * 0.35f * planeChaos;
+                aStart += Random.Range(-jitter, jitter);
+                aEnd += Random.Range(-jitter, jitter);
+
                 FractureCell cell = new FractureCell();
                 cell.planeCount = 0;
 
-                SetPlane(ref cell, spokes[r]);
-
-                int nextR = (r + 1) % radialSlices;
-                ClipPlane rightSpoke = spokes[nextR];
-                SetPlane(ref cell, new ClipPlane { normal = -rightSpoke.normal, distance = -rightSpoke.distance });
-
                 if (c > 0)
                 {
-                    SetPlane(ref cell, rings[c, r]);
+                    Vector3 dir = (tangent * Mathf.Cos((aStart + aEnd) / 2f)) + (bitangent * Mathf.Sin((aStart + aEnd) / 2f));
+                    Vector3 pt = impact + dir * rInner;
+                    Vector3 normal = Quaternion.AngleAxis(Random.Range(-30f, 30f) * planeChaos, Vector3.Cross(dir, wallNormal)) * dir;
+                    SetPlane(ref cell, new ClipPlane { normal = normal, distance = Vector3.Dot(pt, normal) });
                 }
 
-                if (c < cylinderSlices - 1)
+                if (c < cylinderSlices)
                 {
-                    ClipPlane outerRing = rings[c + 1, r];
-                    SetPlane(ref cell, new ClipPlane { normal = -outerRing.normal, distance = -outerRing.distance });
+                    Vector3 dir = (tangent * Mathf.Cos((aStart + aEnd) / 2f)) + (bitangent * Mathf.Sin((aStart + aEnd) / 2f));
+                    Vector3 pt = impact + dir * rOuter;
+                    Vector3 normal = Quaternion.AngleAxis(Random.Range(-30f, 30f) * planeChaos, Vector3.Cross(dir, wallNormal)) * -dir;
+                    SetPlane(ref cell, new ClipPlane { normal = normal, distance = Vector3.Dot(pt, normal) });
                 }
+
+                Vector3 leftDir = (tangent * Mathf.Cos(aStart)) + (bitangent * Mathf.Sin(aStart));
+                Vector3 leftNorm = Vector3.Cross(wallNormal, leftDir).normalized;
+                leftNorm = Quaternion.AngleAxis(Random.Range(-45f, 45f) * planeChaos, leftDir) * leftNorm;
+                SetPlane(ref cell, new ClipPlane { normal = leftNorm, distance = Vector3.Dot(impact, leftNorm) });
+
+                Vector3 rightDir = (tangent * Mathf.Cos(aEnd)) + (bitangent * Mathf.Sin(aEnd));
+                Vector3 rightNorm = Vector3.Cross(rightDir, wallNormal).normalized;
+                rightNorm = Quaternion.AngleAxis(Random.Range(-45f, 45f) * planeChaos, rightDir) * rightNorm;
+                SetPlane(ref cell, new ClipPlane { normal = rightNorm, distance = Vector3.Dot(impact, rightNorm) });
 
                 baseCells.Add(cell);
             }
@@ -205,7 +205,7 @@ public class PlanarDestruction : MonoBehaviour
         for (int i = 0; i < extraCrossCuts; i++)
         {
             Vector3 randNormal = Random.onUnitSphere;
-            Vector3 pt = impact + Random.insideUnitSphere * (impactRadius * 0.3f);
+            Vector3 pt = impact + Random.insideUnitSphere * (impactRadius * 0.2f);
             ClipPlane crossPlane = new ClipPlane { normal = randNormal, distance = Vector3.Dot(pt, randNormal) };
             ClipPlane invCrossPlane = new ClipPlane { normal = -randNormal, distance = -Vector3.Dot(pt, randNormal) };
 
@@ -222,10 +222,7 @@ public class PlanarDestruction : MonoBehaviour
                     SetPlane(ref negCell, invCrossPlane);
                     splitCells.Add(negCell);
                 }
-                else
-                {
-                    splitCells.Add(cell);
-                }
+                else splitCells.Add(cell);
             }
             finalCells = splitCells;
         }
@@ -306,7 +303,6 @@ public class PlanarDestruction : MonoBehaviour
 
             Dictionary<(Vector3, Vector3), int> visWeldMap = new Dictionary<(Vector3, Vector3), int>();
 
-            // Separate collision structures
             List<Vector3> colVerts = new List<Vector3>();
             List<int> colTris = new List<int>();
             Dictionary<Vector3, int> colWeldMap = new Dictionary<Vector3, int>();
@@ -317,6 +313,7 @@ public class PlanarDestruction : MonoBehaviour
                 Vector3 lv1 = t.v1 - centerOfMass;
                 Vector3 lv2 = t.v2 - centerOfMass;
 
+                // We trust the GPU's mathematically perfect normals unconditionally.
                 Vector3 flatNormal = t.normal;
                 Vector3 faceCenter = (lv0 + lv1 + lv2) / 3f;
                 bool isFlipped = Vector3.Dot(flatNormal, faceCenter) < 0;
@@ -353,19 +350,10 @@ public class PlanarDestruction : MonoBehaviour
 
             if (colVerts.Count < 4) continue;
 
-            // =================================================================================
-            // THE FIX: "Collision ShrinkWrap"
-            // We pull the collision vertices inward by the collisionShrink percentage.
-            // This leaves the Visual Mesh perfectly 100% flush, but creates a safe physical 
-            // gap so the needle-thin pizza-slice tips don't overlap infinitely at the center.
-            // =================================================================================
-            for (int i = 0; i < colVerts.Count; i++)
-            {
-                colVerts[i] = colVerts[i] * collisionShrink;
-            }
-
             Mesh visMesh = new Mesh();
             visMesh.vertices = visVerts.ToArray();
+
+            // The GPU-generated normals are directly applied. No overwriting occurs.
             visMesh.normals = visNorms.ToArray();
             visMesh.uv = visUvs.ToArray();
             visMesh.subMeshCount = 2;
@@ -381,9 +369,6 @@ public class PlanarDestruction : MonoBehaviour
             chunkObj.transform.position = transform.TransformPoint(centerOfMass);
             chunkObj.transform.rotation = transform.rotation;
 
-            // Visual scale is strictly 1.0. No ugly gaps will be visible before the explosion.
-            chunkObj.transform.localScale = transform.localScale;
-
             chunkObj.AddComponent<MeshFilter>().mesh = visMesh;
             MeshRenderer mr = chunkObj.AddComponent<MeshRenderer>();
             mr.materials = new Material[] { outsideMaterial, insideMaterial };
@@ -391,13 +376,15 @@ public class PlanarDestruction : MonoBehaviour
             MeshCollider col = chunkObj.AddComponent<MeshCollider>();
             col.convex = true;
             col.sharedMesh = colMesh;
+
+            // Physics material guarantees dead-weight concrete behavior
             if (rubblePhysicsMaterial != null) col.material = rubblePhysicsMaterial;
 
             Rigidbody rb = chunkObj.AddComponent<Rigidbody>();
             float chunkVolume = CalculateVolume(tris);
-            rb.mass = Mathf.Max(totalWallMass * (chunkVolume / totalVolume), 0.05f);
+            float calculatedMass = totalWallMass * (chunkVolume / totalVolume);
 
-            // Backup safety: Keep maximum sliding velocity low just in case geometry gets weird
+            rb.mass = Mathf.Max(calculatedMass, minShardMass);
             rb.maxDepenetrationVelocity = 2.0f;
 
             if (explosionForce > 0f)
@@ -428,13 +415,11 @@ public class PlanarDestruction : MonoBehaviour
             Mathf.Round(v.y * 10000f) / 10000f,
             Mathf.Round(v.z * 10000f) / 10000f
         );
-        Vector3 roundedN = new Vector3(
-            Mathf.Round(n.x * 100f) / 100f,
-            Mathf.Round(n.y * 100f) / 100f,
-            Mathf.Round(n.z * 100f) / 100f
-        );
 
-        var key = (roundedV, roundedN);
+        // THE FIX: Exact normals are required as keys. Rounding them forced sharp corners 
+        // to share smoothed normals, creating the muddy shadow artifacts.
+        var key = (roundedV, n);
+
         if (map.TryGetValue(key, out int idx)) return idx;
 
         idx = verts.Count;
