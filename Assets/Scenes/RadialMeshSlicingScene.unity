@@ -584,11 +584,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::GPUMeshSlicer
   planarCompute: {fileID: 7200000, guid: ef3fc1d4916f13e4a81b93bcbe1187ad, type: 3}
   wallNormal: {x: 0, y: 0, z: 1}
-  impactRadius: 10
+  impactRadius: 4
+  focus: 2.5
   cylinderSlices: 6
   radialSlices: 40
   planeChaos: 1
-  explosionForce: 10
+  extraCrossCuts: 2
+  explosionForce: 0
+  explosionRadius: 4
   projectileTag: Cannonball
   outsideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
   insideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}

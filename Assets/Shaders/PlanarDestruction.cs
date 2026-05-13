@@ -6,7 +6,7 @@ using UnityEngine.Rendering;
 [RequireComponent(typeof(MeshFilter))]
 [RequireComponent(typeof(MeshRenderer))]
 [RequireComponent(typeof(Collider))]
-public class PlanarWallDestruction : MonoBehaviour
+public class PlanarDestruction : MonoBehaviour
 {
     [Header("Compute Shader (REQUIRED)")]
     public ComputeShader planarCompute;
@@ -14,14 +14,22 @@ public class PlanarWallDestruction : MonoBehaviour
     [Header("Slicing Geometry Settings")]
     public Vector3 wallNormal = Vector3.forward;
     public float impactRadius = 4f;
+
+    [Tooltip("Packs the cylindrical rings tighter near the center. 1 = linear, 3 = highly dense center.")]
+    [Range(1f, 5f)] public float focus = 2.5f;
+
     public int cylinderSlices = 4;
     public int radialSlices = 8;
 
-    [Tooltip("Randomness of the plane angles to simulate DestructibleWallSlicing.cs chaos")]
-    [Range(0f, 1f)] public float planeChaos = 0.3f;
+    [Tooltip("Randomness of the plane angles to break 2D symmetry.")]
+    [Range(0f, 1f)] public float planeChaos = 0.5f;
+
+    [Tooltip("Number of global 3D cuts that slice through the entire fracture zone. Utterly destroys spider-web shapes.")]
+    [Range(0, 3)] public int extraCrossCuts = 2;
 
     [Header("Physics Settings")]
     public float explosionForce = 600f;
+    public float explosionRadius = 4f;
     public string projectileTag = "CannonBall";
 
     [Header("Materials")]
@@ -32,13 +40,10 @@ public class PlanarWallDestruction : MonoBehaviour
     private float totalWallMass = 100f;
     private Bounds localBounds;
 
-    // Must match HLSL exactly
     [StructLayout(LayoutKind.Sequential)]
     public struct OutputTriangle
     {
-        public Vector3 v0;
-        public Vector3 v1;
-        public Vector3 v2;
+        public Vector3 v0, v1, v2;
         public Vector3 normal;
         public int isExterior;
         public int cellID;
@@ -54,13 +59,13 @@ public class PlanarWallDestruction : MonoBehaviour
     [StructLayout(LayoutKind.Sequential)]
     public struct FractureCell
     {
-        public ClipPlane p0, p1, p2, p3, p4, p5, p6, p7;
+        public ClipPlane p0, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11;
         public int planeCount;
         public Vector3 pad;
     }
 
     private const int STRIDE = 56;
-    private const int CELL_STRIDE = (8 * 16) + 4 + 12; // 8 planes + count + padding
+    private const int CELL_STRIDE = (12 * 16) + 4 + 12;
 
     void Start()
     {
@@ -77,7 +82,6 @@ public class PlanarWallDestruction : MonoBehaviour
     {
         if (isBroken) return;
         if (!string.IsNullOrEmpty(projectileTag) && !collision.gameObject.CompareTag(projectileTag)) return;
-
         if (planarCompute == null) return;
 
         if (collision.contacts.Length > 0)
@@ -92,10 +96,9 @@ public class PlanarWallDestruction : MonoBehaviour
     {
         Vector3 localImpact = transform.InverseTransformPoint(worldImpactPoint);
 
-        // Generate Planar Fracture Cells (Radial + Cylindrical + Chaos)
         FractureCell[] cells = GenerateFracturePlanes(localImpact);
         int cellCount = cells.Length;
-        int maxTriangles = cellCount * 30 * 14;
+        int maxTriangles = cellCount * 20 * 14;
 
         ComputeBuffer cellBuffer = new ComputeBuffer(cellCount, CELL_STRIDE);
         cellBuffer.SetData(cells);
@@ -124,61 +127,105 @@ public class PlanarWallDestruction : MonoBehaviour
 
     private FractureCell[] GenerateFracturePlanes(Vector3 impact)
     {
-        List<FractureCell> cellList = new List<FractureCell>();
-
         Vector3 tangent = Mathf.Abs(wallNormal.y) < 0.99f ? Vector3.up : Vector3.right;
         tangent = Vector3.Normalize(Vector3.Cross(wallNormal, tangent));
         Vector3 bitangent = Vector3.Cross(wallNormal, tangent);
 
+        ClipPlane[] spokes = new ClipPlane[radialSlices];
         float angleStep = (Mathf.PI * 2f) / radialSlices;
-        int currentCellID = 0;
-
-        for (int c = 0; c < cylinderSlices; c++)
+        for (int r = 0; r < radialSlices; r++)
         {
-            float rInner = c == 0 ? 0f : impactRadius * Mathf.Pow((float)c / cylinderSlices, 1.5f);
-            float rOuter = impactRadius * Mathf.Pow((float)(c + 1) / cylinderSlices, 1.5f);
+            float a = r * angleStep + Random.Range(-angleStep * 0.4f, angleStep * 0.4f) * planeChaos;
+            Vector3 dir = (tangent * Mathf.Cos(a)) + (bitangent * Mathf.Sin(a));
+            Vector3 normal = Vector3.Cross(wallNormal, dir).normalized;
 
+            float tilt = Random.Range(-45f, 45f) * planeChaos;
+            normal = Quaternion.AngleAxis(tilt, dir) * normal;
+
+            spokes[r] = new ClipPlane { normal = normal, distance = Vector3.Dot(impact, normal) };
+        }
+
+        ClipPlane[,] rings = new ClipPlane[cylinderSlices, radialSlices];
+        float[] radii = new float[cylinderSlices];
+        for (int c = 1; c < cylinderSlices; c++)
+        {
+            radii[c] = impactRadius * Mathf.Pow((float)c / cylinderSlices, focus);
+        }
+
+        for (int c = 1; c < cylinderSlices; c++)
+        {
             for (int r = 0; r < radialSlices; r++)
             {
-                float aStart = r * angleStep;
-                float aEnd = (r + 1) * angleStep;
+                float aMid = (r + 0.5f) * angleStep;
+                Vector3 dir = (tangent * Mathf.Cos(aMid)) + (bitangent * Mathf.Sin(aMid));
+                Vector3 pt = impact + dir * radii[c];
 
-                // Add chaotic jitter to mimic DestructibleWallSlicing
-                float jitter = angleStep * 0.3f * planeChaos;
-                aStart += Random.Range(-jitter, jitter);
-                aEnd += Random.Range(-jitter, jitter);
+                float tilt = Random.Range(-40f, 40f) * planeChaos;
+                Vector3 normal = Quaternion.AngleAxis(tilt, Vector3.Cross(dir, wallNormal)) * dir;
 
+                rings[c, r] = new ClipPlane { normal = normal, distance = Vector3.Dot(pt, normal) };
+            }
+        }
+
+        List<FractureCell> baseCells = new List<FractureCell>();
+        for (int c = 0; c < cylinderSlices; c++)
+        {
+            for (int r = 0; r < radialSlices; r++)
+            {
                 FractureCell cell = new FractureCell();
                 cell.planeCount = 0;
 
-                // Inner Cylindrical Plane
+                SetPlane(ref cell, spokes[r]);
+
+                int nextR = (r + 1) % radialSlices;
+                ClipPlane rightSpoke = spokes[nextR];
+                SetPlane(ref cell, new ClipPlane { normal = -rightSpoke.normal, distance = -rightSpoke.distance });
+
                 if (c > 0)
                 {
-                    Vector3 dir = (tangent * Mathf.Cos((aStart + aEnd) / 2f)) + (bitangent * Mathf.Sin((aStart + aEnd) / 2f));
-                    Vector3 point = impact + dir * rInner;
-                    SetPlane(ref cell, new ClipPlane { normal = dir, distance = Vector3.Dot(point, dir) });
+                    SetPlane(ref cell, rings[c, r]);
                 }
 
-                // Outer Cylindrical Plane
-                Vector3 dirOut = (tangent * Mathf.Cos((aStart + aEnd) / 2f)) + (bitangent * Mathf.Sin((aStart + aEnd) / 2f));
-                Vector3 pointOut = impact + dirOut * rOuter;
-                SetPlane(ref cell, new ClipPlane { normal = -dirOut, distance = Vector3.Dot(pointOut, -dirOut) });
+                if (c < cylinderSlices - 1)
+                {
+                    ClipPlane outerRing = rings[c + 1, r];
+                    SetPlane(ref cell, new ClipPlane { normal = -outerRing.normal, distance = -outerRing.distance });
+                }
 
-                // Left Radial Plane
-                Vector3 leftDir = (tangent * Mathf.Cos(aStart)) + (bitangent * Mathf.Sin(aStart));
-                Vector3 leftNormal = Vector3.Cross(wallNormal, leftDir).normalized;
-                SetPlane(ref cell, new ClipPlane { normal = leftNormal, distance = Vector3.Dot(impact, leftNormal) });
-
-                // Right Radial Plane
-                Vector3 rightDir = (tangent * Mathf.Cos(aEnd)) + (bitangent * Mathf.Sin(aEnd));
-                Vector3 rightNormal = Vector3.Cross(rightDir, wallNormal).normalized;
-                SetPlane(ref cell, new ClipPlane { normal = rightNormal, distance = Vector3.Dot(impact, rightNormal) });
-
-                cellList.Add(cell);
-                currentCellID++;
+                baseCells.Add(cell);
             }
         }
-        return cellList.ToArray();
+
+        List<FractureCell> finalCells = new List<FractureCell>(baseCells);
+        for (int i = 0; i < extraCrossCuts; i++)
+        {
+            Vector3 randNormal = Random.onUnitSphere;
+            Vector3 pt = impact + Random.insideUnitSphere * (impactRadius * 0.3f);
+            ClipPlane crossPlane = new ClipPlane { normal = randNormal, distance = Vector3.Dot(pt, randNormal) };
+            ClipPlane invCrossPlane = new ClipPlane { normal = -randNormal, distance = -Vector3.Dot(pt, randNormal) };
+
+            List<FractureCell> splitCells = new List<FractureCell>();
+            foreach (var cell in finalCells)
+            {
+                if (cell.planeCount < 12)
+                {
+                    FractureCell posCell = cell;
+                    SetPlane(ref posCell, crossPlane);
+                    splitCells.Add(posCell);
+
+                    FractureCell negCell = cell;
+                    SetPlane(ref negCell, invCrossPlane);
+                    splitCells.Add(negCell);
+                }
+                else
+                {
+                    splitCells.Add(cell);
+                }
+            }
+            finalCells = splitCells;
+        }
+
+        return finalCells.ToArray();
     }
 
     private void SetPlane(ref FractureCell cell, ClipPlane plane)
@@ -193,6 +240,10 @@ public class PlanarWallDestruction : MonoBehaviour
             case 5: cell.p5 = plane; break;
             case 6: cell.p6 = plane; break;
             case 7: cell.p7 = plane; break;
+            case 8: cell.p8 = plane; break;
+            case 9: cell.p9 = plane; break;
+            case 10: cell.p10 = plane; break;
+            case 11: cell.p11 = plane; break;
         }
         cell.planeCount++;
     }
@@ -207,7 +258,6 @@ public class PlanarWallDestruction : MonoBehaviour
         OutputTriangle[] gpuTriangles = request.GetData<OutputTriangle>().ToArray();
         GetComponent<MeshRenderer>().enabled = false;
 
-        // EXACT Logic from VoronoiDestruction.cs starts here
         BuildDualMeshChunks(gpuTriangles, worldImpactPoint);
     }
 
@@ -260,7 +310,6 @@ public class PlanarWallDestruction : MonoBehaviour
                 Vector3 lv1 = t.v1 - centerOfMass;
                 Vector3 lv2 = t.v2 - centerOfMass;
 
-                // Accurate Normal Fixing derived directly from your Voronoi script
                 Vector3 flatNormal = t.normal;
                 Vector3 faceCenter = (lv0 + lv1 + lv2) / 3f;
                 bool isFlipped = Vector3.Dot(flatNormal, faceCenter) < 0;
@@ -314,8 +363,8 @@ public class PlanarWallDestruction : MonoBehaviour
             chunkObj.transform.position = transform.TransformPoint(centerOfMass);
             chunkObj.transform.rotation = transform.rotation;
 
-            // Minimal shrink to prevent PhysX collision explosions
-            chunkObj.transform.localScale = transform.localScale * 0.995f;
+            // INCREASED gap to 0.98 to account for Unity's Default Contact Offset in Convex Hulls
+            chunkObj.transform.localScale = transform.localScale * 0.98f;
 
             chunkObj.AddComponent<MeshFilter>().mesh = visMesh;
             MeshRenderer mr = chunkObj.AddComponent<MeshRenderer>();
@@ -326,9 +375,20 @@ public class PlanarWallDestruction : MonoBehaviour
             col.sharedMesh = colMesh;
 
             Rigidbody rb = chunkObj.AddComponent<Rigidbody>();
+
             float chunkVolume = CalculateVolume(tris);
             rb.mass = Mathf.Max(totalWallMass * (chunkVolume / totalVolume), 0.05f);
-            rb.AddExplosionForce(explosionForce, worldImpactPoint, impactRadius, 0.5f, ForceMode.Impulse);
+
+            // =========================================================================
+            // THE PHYSICS FIX: Prevent the overlapping colliders from violently pushing apart
+            // =========================================================================
+            rb.maxDepenetrationVelocity = 2.0f; // Softly slide apart instead of shooting away
+
+            // Only apply our intended force
+            if (explosionForce > 0f)
+            {
+                rb.AddExplosionForce(explosionForce, worldImpactPoint, explosionRadius);
+            }
         }
 
         Destroy(gameObject, 2f);

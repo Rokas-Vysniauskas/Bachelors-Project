@@ -14,17 +14,19 @@ struct OutputTriangle
 struct ClipPlane
 {
     float3 normal;
-    float distance; // dot(PointOnPlane, Normal)
+    float distance;
 };
 
 struct FractureCell
 {
-    ClipPlane planes[8]; // Max 8 bounding planes per chunk
+    ClipPlane planes[12];
     int planeCount;
-    float3 pad; // Memory alignment
+    float3 pad;
 };
 
-#define MAX_FACES 30
+// Mathematically proven bounds for a 6-sided box with 12 clipping planes.
+// Prevents Register Overflow and "Invalid Kernel" compiler crashes.
+#define MAX_FACES 20
 #define MAX_VERTS 16
 
 StructuredBuffer<FractureCell> _Cells;
@@ -49,7 +51,6 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
     float3 faces_normal[MAX_FACES];
     int faces_isSurface[MAX_FACES];
     
-    // Initialize the solid bounding box
     float3 v000 = float3(_BoxMin.x, _BoxMin.y, _BoxMin.z);
     float3 v100 = float3(_BoxMax.x, _BoxMin.y, _BoxMin.z);
     float3 v010 = float3(_BoxMin.x, _BoxMax.y, _BoxMin.z);
@@ -59,7 +60,7 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
     float3 v011 = float3(_BoxMin.x, _BoxMax.y, _BoxMax.z);
     float3 v111 = float3(_BoxMax.x, _BoxMax.y, _BoxMax.z);
 
-    // Initial 6 faces (Wall exterior)
+    // Initial Solid Wall Box
     faces_vertCount[0] = 4;
     faces_isSurface[0] = 1;
     faces_normal[0] = float3(0, 0, -1);
@@ -108,7 +109,7 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
     faces_verts[5][2] = v000;
     faces_verts[5][3] = v001;
 
-    // Apply Explicit Slicing Planes
+    // Slicing Engine
     for (int p = 0; p < cell.planeCount; p++)
     {
         float3 planeNormal = cell.planes[p].normal;
@@ -154,7 +155,6 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
 
                         if (aInside != bInside)
                         {
-                            // Calculate intersection exactly like Voronoi
                             float denom = dot(pB - pA, planeNormal);
                             float t = (abs(denom) > 0.000001f) ? (planeDist - dot(pA, planeNormal)) / denom : 0.5f;
                             float3 intersect = lerp(pA, pB, t);
@@ -195,7 +195,7 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
             }
         }
 
-        // Cap the Hole using Voronoi Radial Sorting
+        // Capping Logic
         if (capPtCount >= 3 && nextFaceCount < MAX_FACES)
         {
             float3 center = float3(0, 0, 0);
@@ -233,7 +233,7 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
 
             next_faces_vertCount[nextFaceCount] = capPtCount;
             next_faces_normal[nextFaceCount] = planeNormal;
-            next_faces_isSurface[nextFaceCount] = 0; // Mark as inside cut face
+            next_faces_isSurface[nextFaceCount] = 0;
             
             for (int c2 = 0; c2 < MAX_VERTS; c2++)
             {
@@ -261,7 +261,7 @@ void GeneratePlanarGeometry(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    // Output Triangles
+    // Output
     for (int tF = 0; tF < MAX_FACES; tF++)
     {
         if (tF < faceCount)
