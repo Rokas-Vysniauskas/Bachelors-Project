@@ -30,11 +30,16 @@ public class PlanarDestruction : MonoBehaviour
     [Header("Physics Settings")]
     public float explosionForce = 600f;
     public float explosionRadius = 4f;
+
+    [Tooltip("Shrinks ONLY the physics collider to prevent the 'Pizza Slice' explosion without creating visual gaps.")]
+    [Range(0.8f, 0.99f)] public float collisionShrink = 0.95f;
+
     public string projectileTag = "CannonBall";
 
     [Header("Materials")]
     public Material outsideMaterial;
     public Material insideMaterial;
+    public PhysicsMaterial rubblePhysicsMaterial;
 
     private bool isBroken = false;
     private float totalWallMass = 100f;
@@ -300,6 +305,8 @@ public class PlanarDestruction : MonoBehaviour
             List<int> visInsideTris = new List<int>();
 
             Dictionary<(Vector3, Vector3), int> visWeldMap = new Dictionary<(Vector3, Vector3), int>();
+
+            // Separate collision structures
             List<Vector3> colVerts = new List<Vector3>();
             List<int> colTris = new List<int>();
             Dictionary<Vector3, int> colWeldMap = new Dictionary<Vector3, int>();
@@ -346,6 +353,17 @@ public class PlanarDestruction : MonoBehaviour
 
             if (colVerts.Count < 4) continue;
 
+            // =================================================================================
+            // THE FIX: "Collision ShrinkWrap"
+            // We pull the collision vertices inward by the collisionShrink percentage.
+            // This leaves the Visual Mesh perfectly 100% flush, but creates a safe physical 
+            // gap so the needle-thin pizza-slice tips don't overlap infinitely at the center.
+            // =================================================================================
+            for (int i = 0; i < colVerts.Count; i++)
+            {
+                colVerts[i] = colVerts[i] * collisionShrink;
+            }
+
             Mesh visMesh = new Mesh();
             visMesh.vertices = visVerts.ToArray();
             visMesh.normals = visNorms.ToArray();
@@ -363,8 +381,8 @@ public class PlanarDestruction : MonoBehaviour
             chunkObj.transform.position = transform.TransformPoint(centerOfMass);
             chunkObj.transform.rotation = transform.rotation;
 
-            // INCREASED gap to 0.98 to account for Unity's Default Contact Offset in Convex Hulls
-            chunkObj.transform.localScale = transform.localScale * 0.98f;
+            // Visual scale is strictly 1.0. No ugly gaps will be visible before the explosion.
+            chunkObj.transform.localScale = transform.localScale;
 
             chunkObj.AddComponent<MeshFilter>().mesh = visMesh;
             MeshRenderer mr = chunkObj.AddComponent<MeshRenderer>();
@@ -373,18 +391,15 @@ public class PlanarDestruction : MonoBehaviour
             MeshCollider col = chunkObj.AddComponent<MeshCollider>();
             col.convex = true;
             col.sharedMesh = colMesh;
+            if (rubblePhysicsMaterial != null) col.material = rubblePhysicsMaterial;
 
             Rigidbody rb = chunkObj.AddComponent<Rigidbody>();
-
             float chunkVolume = CalculateVolume(tris);
             rb.mass = Mathf.Max(totalWallMass * (chunkVolume / totalVolume), 0.05f);
 
-            // =========================================================================
-            // THE PHYSICS FIX: Prevent the overlapping colliders from violently pushing apart
-            // =========================================================================
-            rb.maxDepenetrationVelocity = 2.0f; // Softly slide apart instead of shooting away
+            // Backup safety: Keep maximum sliding velocity low just in case geometry gets weird
+            rb.maxDepenetrationVelocity = 2.0f;
 
-            // Only apply our intended force
             if (explosionForce > 0f)
             {
                 rb.AddExplosionForce(explosionForce, worldImpactPoint, explosionRadius);

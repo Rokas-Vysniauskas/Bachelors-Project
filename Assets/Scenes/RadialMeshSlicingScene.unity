@@ -552,6 +552,14 @@ PrefabInstance:
       propertyPath: m_Name
       value: Wall_Mesh_Slicing
       objectReference: {fileID: 0}
+    - target: {fileID: 3817432030409139054, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
+      propertyPath: m_Material
+      value: 
+      objectReference: {fileID: 13400000, guid: 28e15d1211219f547ba0a6a521b56382, type: 2}
+    - target: {fileID: 8756559172382686110, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
+      propertyPath: m_Mass
+      value: 3000
+      objectReference: {fileID: 0}
     - target: {fileID: 8756559172382686110, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
       propertyPath: m_Constraints
       value: 112
@@ -592,9 +600,11 @@ MonoBehaviour:
   extraCrossCuts: 2
   explosionForce: 0
   explosionRadius: 4
+  collisionShrink: 0.99
   projectileTag: Cannonball
   outsideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
   insideMaterial: {fileID: 2100000, guid: f8d5adbfdff4ffe4a9a515eee3020841, type: 2}
+  rubblePhysicsMaterial: {fileID: 13400000, guid: 28e15d1211219f547ba0a6a521b56382, type: 2}
 --- !u!1001 &8020139810614280795
 PrefabInstance:
   m_ObjectHideFlags: 0
