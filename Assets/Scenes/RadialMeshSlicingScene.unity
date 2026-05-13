@@ -594,11 +594,11 @@ MonoBehaviour:
   wallNormal: {x: 0, y: 0, z: 1}
   impactRadius: 4
   focus: 2.5
-  cylinderSlices: 8
+  cylinderSlices: 7
   radialSlices: 40
   coreSlices: 6
   planeChaos: 1
-  extraCrossCuts: 2
+  extraCrossCuts: 3
   explosionForce: 0
   explosionRadius: 4
   minShardMass: 2
