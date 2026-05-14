@@ -1,6 +1,8 @@
 #pragma kernel ApplyImpact
 #pragma kernel CalculateStress
 #pragma kernel IntegrateAndFracture
+#pragma kernel GenerateWallMesh
+#pragma kernel ClearWallMesh // NEW: Instantly wipes the memory
 #pragma target 5.0 
 
 struct Node
@@ -10,14 +12,27 @@ struct Node
     float3 velocity;
     float stress;
     int isBroken;
+    int isAnchor;
+};
+
+struct OutputTriangle
+{
+    float3 v0;
+    float3 v1;
+    float3 v2;
+    float3 normal;
+    int isValid; // NEW: Bulletproof check for C#
 };
 
 RWStructuredBuffer<Node> _Nodes;
+AppendStructuredBuffer<OutputTriangle> _WallTriangles;
+RWStructuredBuffer<OutputTriangle> _WallTrianglesRW; // Allows us to overwrite the buffer for clearing
 
 float _DeltaTime;
 float _Stiffness;
 float _Damping;
 float _YieldStress;
+float _MaxDisplacement;
 int3 _GridResolution;
 float3 _NodeSpacing;
 
@@ -26,6 +41,11 @@ float3 _ImpactVelocity;
 float _ImpactRadius;
 float _ImpactMass;
 int _HasImpact;
+
+float3 _BoxMin;
+float3 _BoxMax;
+float _JitterAmount;
+uint _MaxTriangles;
 
 int GetIndex(int3 coord)
 {
@@ -38,12 +58,91 @@ int GetIndex(int3 coord)
     return coord.x + coord.y * _GridResolution.x + coord.z * _GridResolution.x * _GridResolution.y;
 }
 
+float hash(float3 p)
+{
+    return frac(sin(dot(p, float3(12.9898, 78.233, 45.5432))) * 43758.5453);
+}
+
+float3 GetJitteredVertex(float3 pos, float maxJitter)
+{
+    if (abs(pos.x - _BoxMax.x) < 0.05f || abs(pos.x - _BoxMin.x) < 0.05f ||
+        abs(pos.y - _BoxMax.y) < 0.05f || abs(pos.y - _BoxMin.y) < 0.05f ||
+        abs(pos.z - _BoxMax.z) < 0.05f || abs(pos.z - _BoxMin.z) < 0.05f)
+    {
+        return pos;
+    }
+
+    float nx = (hash(pos * 15.0) - 0.5) * 2.0;
+    float ny = (hash(pos * 25.0 + float3(1, 0, 0)) - 0.5) * 2.0;
+    float nz = (hash(pos * 35.0 + float3(0, 1, 0)) - 0.5) * 2.0;
+
+    return pos + float3(nx, ny, nz) * maxJitter;
+}
+
+void AppendQuad(float3 c, float3 h, int i0, int i1, int i2, int i3, float3 normal)
+{
+    float3 p[8];
+    p[0] = c + float3(-h.x, -h.y, -h.z);
+    p[1] = c + float3(h.x, -h.y, -h.z);
+    p[2] = c + float3(h.x, h.y, -h.z);
+    p[3] = c + float3(-h.x, h.y, -h.z);
+    p[4] = c + float3(-h.x, -h.y, h.z);
+    p[5] = c + float3(h.x, -h.y, h.z);
+    p[6] = c + float3(h.x, h.y, h.z);
+    p[7] = c + float3(-h.x, h.y, h.z);
+
+    float maxJitter = length(h * 2.0) * _JitterAmount;
+
+    OutputTriangle t1;
+    t1.v0 = GetJitteredVertex(p[i0], maxJitter);
+    t1.v1 = GetJitteredVertex(p[i1], maxJitter);
+    t1.v2 = GetJitteredVertex(p[i2], maxJitter);
+    t1.normal = normal;
+    t1.isValid = 1;
+
+    OutputTriangle t2;
+    t2.v0 = GetJitteredVertex(p[i0], maxJitter);
+    t2.v1 = GetJitteredVertex(p[i2], maxJitter);
+    t2.v2 = GetJitteredVertex(p[i3], maxJitter);
+    t2.normal = normal;
+    t2.isValid = 1;
+
+    _WallTriangles.Append(t1);
+    _WallTriangles.Append(t2);
+}
+
+bool IsEmpty(int3 coord)
+{
+    if (coord.x < 0 || coord.x >= _GridResolution.x ||
+        coord.y < 0 || coord.y >= _GridResolution.y ||
+        coord.z < 0 || coord.z >= _GridResolution.z) 
+        return true;
+        
+    int idx = GetIndex(coord);
+    return _Nodes[idx].isBroken >= 1;
+}
+
+[numthreads(64, 1, 1)]
+void ClearWallMesh(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _MaxTriangles)
+        return;
+    
+    OutputTriangle emptyTri;
+    emptyTri.v0 = float3(0, 0, 0);
+    emptyTri.v1 = float3(0, 0, 0);
+    emptyTri.v2 = float3(0, 0, 0);
+    emptyTri.normal = float3(0, 0, 0);
+    emptyTri.isValid = 0; // Invalidates ghost triangles
+    
+    _WallTrianglesRW[id.x] = emptyTri;
+}
+
 [numthreads(8, 8, 8)]
 void ApplyImpact(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
         return;
-    
     int index = GetIndex(int3(id.x, id.y, id.z));
     if (_Nodes[index].isBroken >= 1 || _HasImpact == 0)
         return;
@@ -61,7 +160,6 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
         return;
-    
     int index = GetIndex(int3(id.x, id.y, id.z));
     if (_Nodes[index].isBroken >= 1)
         return;
@@ -72,12 +170,10 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
 
     int3 offsets[6] =
     {
-        int3(1, 0, 0), int3(-1, 0, 0),
-        int3(0, 1, 0), int3(0, -1, 0),
-        int3(0, 0, 1), int3(0, 0, -1)
+        int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0),
+        int3(0, -1, 0), int3(0, 0, 1), int3(0, 0, -1)
     };
 
-    // Calculate maximum allowable stretch before the math breaks
     float maxStretch = length(_NodeSpacing) * 0.5;
 
     for (int i = 0; i < 6; i++)
@@ -93,20 +189,17 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
                 float currentDist = length(currentDir);
                 float restDist = length(restDir);
                 
-                float displacement = currentDist - restDist;
-                
-                // PHYSICS FIX: Clamp the displacement. This stops the infinite force 
-                // accumulation that causes the wall to explode when neighbors vanish.
-                displacement = clamp(displacement, -maxStretch, maxStretch);
-                
-                float3 forceDir = normalize(currentDir);
-                totalForce += forceDir * (displacement * _Stiffness);
-                localStress += abs(displacement);
+                // PHYSICS FIX: Prevents normalization of (0,0,0) which causes NaN explosions
+                if (currentDist > 0.0001f)
+                {
+                    float displacement = clamp(currentDist - restDist, -maxStretch, maxStretch);
+                    float3 forceDir = currentDir / currentDist;
+                    totalForce += forceDir * (displacement * _Stiffness);
+                    localStress += abs(displacement);
+                }
             }
             else
-            {
                 energySink *= 0.3;
-            }
         }
     }
 
@@ -128,15 +221,51 @@ void IntegrateAndFracture(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
         return;
+    int index = GetIndex(int3(id.x, id.y, id.z));
+    if (_Nodes[index].isBroken >= 1)
+        return;
+
+    if (_Nodes[index].isAnchor == 1)
+    {
+        _Nodes[index].position = _Nodes[index].restPosition;
+        _Nodes[index].velocity = float3(0, 0, 0);
+    }
+    else
+    {
+        _Nodes[index].position += _Nodes[index].velocity * _DeltaTime;
+        if (distance(_Nodes[index].position, _Nodes[index].restPosition) > _MaxDisplacement)
+        {
+            _Nodes[index].isBroken = 1;
+        }
+    }
+
+    if (_Nodes[index].stress > _YieldStress)
+        _Nodes[index].isBroken = 1;
+}
+
+[numthreads(8, 8, 8)]
+void GenerateWallMesh(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
+        return;
     
     int index = GetIndex(int3(id.x, id.y, id.z));
     if (_Nodes[index].isBroken >= 1)
         return;
 
-    _Nodes[index].position += _Nodes[index].velocity * _DeltaTime;
+    float3 h = _NodeSpacing / 2.0;
+    float3 center = _BoxMin + h + float3(id.x * _NodeSpacing.x, id.y * _NodeSpacing.y, id.z * _NodeSpacing.z);
 
-    if (_Nodes[index].stress > _YieldStress)
-    {
-        _Nodes[index].isBroken = 1;
-    }
+    if (IsEmpty(int3(id.x + 1, id.y, id.z)))
+        AppendQuad(center, h, 5, 1, 2, 6, float3(1, 0, 0));
+    if (IsEmpty(int3(id.x - 1, id.y, id.z)))
+        AppendQuad(center, h, 0, 4, 7, 3, float3(-1, 0, 0));
+    if (IsEmpty(int3(id.x, id.y + 1, id.z)))
+        AppendQuad(center, h, 3, 7, 6, 2, float3(0, 1, 0));
+    if (IsEmpty(int3(id.x, id.y - 1, id.z)))
+        AppendQuad(center, h, 0, 1, 5, 4, float3(0, -1, 0));
+    if (IsEmpty(int3(id.x, id.y, id.z + 1)))
+        AppendQuad(center, h, 4, 5, 6, 7, float3(0, 0, 1));
+    if (IsEmpty(int3(id.x, id.y, id.z - 1)))
+        AppendQuad(center, h, 1, 0, 3, 2, float3(0, 0, -1));
 }

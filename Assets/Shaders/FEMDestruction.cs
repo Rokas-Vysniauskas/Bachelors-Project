@@ -13,14 +13,16 @@ public class FEMDestruction : MonoBehaviour
     public ComputeShader femCompute;
 
     [Header("Destruction Visuals")]
-    [Tooltip("Assign a jagged ROCK prefab here, NOT a perfect cube, for Voronoi-style debris.")]
     public GameObject debrisPrefab;
-
-    [Tooltip("Scrambles the internal voxel grid to look like jagged, broken concrete.")]
     [Range(0f, 1f)] public float vertexJitterAmount = 0.4f;
 
     [Header("FEM Resolution")]
-    public Vector3Int nodeResolution = new Vector3Int(20, 10, 4);
+    public Vector3Int nodeResolution = new Vector3Int(40, 40, 10);
+
+    [Header("Structural Integrity")]
+    public bool anchorBottomToGround = true;
+    public bool anchorSidesToWalls = false;
+    public float maxDeformationDistance = 0.6f;
 
     [Header("Physics Settings")]
     public float stiffness = 5000f;
@@ -34,16 +36,23 @@ public class FEMDestruction : MonoBehaviour
     [StructLayout(LayoutKind.Sequential)]
     private struct Node
     {
-        public Vector3 position;
-        public Vector3 restPosition;
-        public Vector3 velocity;
+        public Vector3 position, restPosition, velocity;
         public float stress;
-        public int isBroken;
+        public int isBroken, isAnchor;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct OutputTriangle
+    {
+        public Vector3 v0, v1, v2, normal;
+        public int isValid;
     }
 
     private ComputeBuffer nodeBuffer;
+    private ComputeBuffer triangleBuffer;
     private int totalNodes;
-    private int kernelApplyImpact, kernelCalculateStress, kernelIntegrate;
+    private int maxTriangles;
+    private int kernelApplyImpact, kernelCalculateStress, kernelIntegrate, kernelGenerateMesh, kernelClearMesh;
     private Vector3Int threadGroups;
     private Vector3 calculatedNodeSpacing;
 
@@ -51,7 +60,8 @@ public class FEMDestruction : MonoBehaviour
     private Vector3 currentImpactPoint, currentImpactVelocity;
     private float currentImpactRadius, currentImpactMass;
 
-    private bool isReadbackPending = false;
+    private bool isPhysicsReadbackPending = false;
+    private bool isMeshReadbackPending = false;
     private bool isWallHidden = false;
     private NativeArray<Node> localNodeData;
     private Bounds localBounds;
@@ -91,25 +101,48 @@ public class FEMDestruction : MonoBehaviour
                     Vector3 localPos = originOffset + new Vector3(x * calculatedNodeSpacing.x, y * calculatedNodeSpacing.y, z * calculatedNodeSpacing.z);
                     Vector3 worldPos = transform.TransformPoint(localPos);
 
-                    initialNodes[index] = new Node { position = worldPos, restPosition = worldPos, velocity = Vector3.zero, stress = 0f, isBroken = 0 };
+                    int isAnchored = 0;
+                    if (anchorBottomToGround && y == 0) isAnchored = 1;
+                    if (anchorSidesToWalls && (x == 0 || x == nodeResolution.x - 1)) isAnchored = 1;
+
+                    initialNodes[index] = new Node
+                    {
+                        position = worldPos,
+                        restPosition = worldPos,
+                        velocity = Vector3.zero,
+                        stress = 0f,
+                        isBroken = 0,
+                        isAnchor = isAnchored
+                    };
                 }
             }
         }
 
-        int stride = Marshal.SizeOf(typeof(Node));
-        nodeBuffer = new ComputeBuffer(totalNodes, stride);
+        int nodeStride = Marshal.SizeOf(typeof(Node));
+        nodeBuffer = new ComputeBuffer(totalNodes, nodeStride);
         nodeBuffer.SetData(initialNodes);
+
+        maxTriangles = totalNodes * 12;
+        int triStride = Marshal.SizeOf(typeof(OutputTriangle));
+        triangleBuffer = new ComputeBuffer(maxTriangles, triStride, ComputeBufferType.Append);
 
         kernelApplyImpact = femCompute.FindKernel("ApplyImpact");
         kernelCalculateStress = femCompute.FindKernel("CalculateStress");
         kernelIntegrate = femCompute.FindKernel("IntegrateAndFracture");
+        kernelGenerateMesh = femCompute.FindKernel("GenerateWallMesh");
+        kernelClearMesh = femCompute.FindKernel("ClearWallMesh");
 
         femCompute.SetBuffer(kernelApplyImpact, "_Nodes", nodeBuffer);
         femCompute.SetBuffer(kernelCalculateStress, "_Nodes", nodeBuffer);
         femCompute.SetBuffer(kernelIntegrate, "_Nodes", nodeBuffer);
 
+        femCompute.SetBuffer(kernelGenerateMesh, "_Nodes", nodeBuffer);
+        femCompute.SetBuffer(kernelGenerateMesh, "_WallTriangles", triangleBuffer);
+
         femCompute.SetInts("_GridResolution", nodeResolution.x, nodeResolution.y, nodeResolution.z);
         femCompute.SetVector("_NodeSpacing", calculatedNodeSpacing);
+        femCompute.SetVector("_BoxMin", localBounds.min);
+        femCompute.SetVector("_BoxMax", localBounds.max);
 
         threadGroups = new Vector3Int(
             Mathf.CeilToInt(nodeResolution.x / 8f),
@@ -135,7 +168,6 @@ public class FEMDestruction : MonoBehaviour
         }
     }
 
-    // PHYSICS FIX: Moved dispatch from Update to FixedUpdate to guarantee integration stability
     private void FixedUpdate()
     {
         if (nodeBuffer == null) return;
@@ -145,16 +177,16 @@ public class FEMDestruction : MonoBehaviour
     private void Update()
     {
         if (nodeBuffer == null) return;
-        RequestAsyncReadback();
+        RequestPhysicsReadback();
     }
 
     private void DispatchComputeShader()
     {
-        // Use fixedDeltaTime to match FixedUpdate
         femCompute.SetFloat("_DeltaTime", Time.fixedDeltaTime);
         femCompute.SetFloat("_Stiffness", stiffness);
         femCompute.SetFloat("_Damping", damping);
         femCompute.SetFloat("_YieldStress", yieldStress);
+        femCompute.SetFloat("_MaxDisplacement", maxDeformationDistance);
 
         if (hasImpactThisFrame)
         {
@@ -172,20 +204,20 @@ public class FEMDestruction : MonoBehaviour
         femCompute.Dispatch(kernelIntegrate, threadGroups.x, threadGroups.y, threadGroups.z);
     }
 
-    private void RequestAsyncReadback()
+    private void RequestPhysicsReadback()
     {
-        if (!isReadbackPending)
+        if (!isPhysicsReadbackPending)
         {
-            isReadbackPending = true;
-            AsyncGPUReadback.Request(nodeBuffer, OnReadbackComplete);
+            isPhysicsReadbackPending = true;
+            AsyncGPUReadback.Request(nodeBuffer, OnPhysicsReadbackComplete);
         }
     }
 
-    private void OnReadbackComplete(AsyncGPUReadbackRequest request)
+    private void OnPhysicsReadbackComplete(AsyncGPUReadbackRequest request)
     {
         if (this == null || !gameObject.activeInHierarchy || request.hasError)
         {
-            isReadbackPending = false;
+            isPhysicsReadbackPending = false;
             return;
         }
 
@@ -216,14 +248,45 @@ public class FEMDestruction : MonoBehaviour
             }
         }
 
-        if (needsMeshRebuild) RebuildProceduralMesh();
         if (bufferNeedsUpdate) nodeBuffer.SetData(localNodeData);
+        isPhysicsReadbackPending = false;
 
-        isReadbackPending = false;
+        if (needsMeshRebuild && !isMeshReadbackPending)
+        {
+            RequestGPUWallMesh();
+        }
     }
 
-    private void RebuildProceduralMesh()
+    private void RequestGPUWallMesh()
     {
+        isMeshReadbackPending = true;
+
+        // 1. Instantly wipe the buffer clean on the GPU (No ghost triangles!)
+        femCompute.SetBuffer(kernelClearMesh, "_WallTrianglesRW", triangleBuffer);
+        femCompute.SetInt("_MaxTriangles", maxTriangles);
+        int threadGroupsClear = Mathf.CeilToInt(maxTriangles / 64f);
+        femCompute.Dispatch(kernelClearMesh, threadGroupsClear, 1, 1);
+
+        // 2. Reset Append Counter
+        triangleBuffer.SetCounterValue(0);
+
+        // 3. Generate fresh mesh
+        femCompute.SetFloat("_JitterAmount", vertexJitterAmount);
+        femCompute.Dispatch(kernelGenerateMesh, threadGroups.x, threadGroups.y, threadGroups.z);
+
+        AsyncGPUReadback.Request(triangleBuffer, OnMeshReadbackComplete);
+    }
+
+    private void OnMeshReadbackComplete(AsyncGPUReadbackRequest request)
+    {
+        if (this == null || !gameObject.activeInHierarchy || request.hasError)
+        {
+            isMeshReadbackPending = false;
+            return;
+        }
+
+        OutputTriangle[] gpuTriangles = request.GetData<OutputTriangle>().ToArray();
+
         if (proceduralMesh == null)
         {
             proceduralMesh = new Mesh();
@@ -243,108 +306,46 @@ public class FEMDestruction : MonoBehaviour
                 mr.materials = GetComponent<MeshRenderer>().sharedMaterials;
 
                 var col = proceduralWallObj.AddComponent<MeshCollider>();
-                // Essential for convex shapes getting physics updates without throwing the Concave error
                 col.convex = true;
             }
         }
 
-        List<Vector3> verts = new List<Vector3>();
-        List<int> tris = new List<int>();
+        List<Vector3> verts = new List<Vector3>(gpuTriangles.Length * 3);
+        List<int> tris = new List<int>(gpuTriangles.Length * 3);
 
-        Vector3 h = calculatedNodeSpacing / 2f;
-        Vector3 originOffset = localBounds.min + h;
-
-        for (int z = 0; z < nodeResolution.z; z++)
+        for (int i = 0; i < gpuTriangles.Length; i++)
         {
-            for (int y = 0; y < nodeResolution.y; y++)
-            {
-                for (int x = 0; x < nodeResolution.x; x++)
-                {
-                    int i = x + y * nodeResolution.x + z * nodeResolution.x * nodeResolution.y;
-                    if (localNodeData[i].isBroken >= 1) continue;
+            // The ultimate validity check. Rejects any uninitialized memory.
+            if (gpuTriangles[i].isValid == 0) continue;
 
-                    Vector3 center = originOffset + new Vector3(x * calculatedNodeSpacing.x, y * calculatedNodeSpacing.y, z * calculatedNodeSpacing.z);
+            int idx = verts.Count;
+            verts.Add(gpuTriangles[i].v0);
+            verts.Add(gpuTriangles[i].v1);
+            verts.Add(gpuTriangles[i].v2);
 
-                    if (IsEmpty(x + 1, y, z)) AddQuad(center, h, 5, 1, 2, 6, verts, tris);
-                    if (IsEmpty(x - 1, y, z)) AddQuad(center, h, 0, 4, 7, 3, verts, tris);
-                    if (IsEmpty(x, y + 1, z)) AddQuad(center, h, 3, 7, 6, 2, verts, tris);
-                    if (IsEmpty(x, y - 1, z)) AddQuad(center, h, 0, 1, 5, 4, verts, tris);
-                    if (IsEmpty(x, y, z + 1)) AddQuad(center, h, 4, 5, 6, 7, verts, tris);
-                    if (IsEmpty(x, y, z - 1)) AddQuad(center, h, 1, 0, 3, 2, verts, tris);
-                }
-            }
+            tris.Add(idx);
+            tris.Add(idx + 1);
+            tris.Add(idx + 2);
         }
 
         proceduralMesh.Clear();
         proceduralMesh.SetVertices(verts);
         proceduralMesh.SetTriangles(tris, 0);
-
-        if (vertexJitterAmount > 0f) ApplyVertexJitter(proceduralMesh);
-
         proceduralMesh.RecalculateNormals();
 
         var colMesh = proceduralWallObj.GetComponent<MeshCollider>();
         colMesh.sharedMesh = null;
         colMesh.sharedMesh = proceduralMesh;
-    }
 
-    // VISUAL FIX: Applies Perlin noise to the interior vertices to break up the "Minecraft" grid
-    private void ApplyVertexJitter(Mesh mesh)
-    {
-        Vector3[] vertices = mesh.vertices;
-        float maxJitter = calculatedNodeSpacing.magnitude * vertexJitterAmount;
-
-        for (int i = 0; i < vertices.Length; i++)
-        {
-            Vector3 pos = vertices[i];
-
-            // Do not jitter the original smooth exterior faces of the wall
-            if (Mathf.Abs(pos.x - localBounds.max.x) < 0.05f || Mathf.Abs(pos.x - localBounds.min.x) < 0.05f ||
-                Mathf.Abs(pos.y - localBounds.max.y) < 0.05f || Mathf.Abs(pos.y - localBounds.min.y) < 0.05f ||
-                Mathf.Abs(pos.z - localBounds.max.z) < 0.05f || Mathf.Abs(pos.z - localBounds.min.z) < 0.05f)
-            {
-                continue;
-            }
-
-            // Generate deterministic 3D noise based on local position
-            float noiseX = (Mathf.PerlinNoise(pos.y * 15f, pos.z * 15f) - 0.5f) * 2f;
-            float noiseY = (Mathf.PerlinNoise(pos.x * 15f, pos.z * 15f) - 0.5f) * 2f;
-            float noiseZ = (Mathf.PerlinNoise(pos.x * 15f, pos.y * 15f) - 0.5f) * 2f;
-
-            vertices[i] += new Vector3(noiseX, noiseY, noiseZ) * maxJitter;
-        }
-
-        mesh.vertices = vertices;
-    }
-
-    private bool IsEmpty(int x, int y, int z)
-    {
-        if (x < 0 || x >= nodeResolution.x || y < 0 || y >= nodeResolution.y || z < 0 || z >= nodeResolution.z) return true;
-        int idx = x + y * nodeResolution.x + z * nodeResolution.x * nodeResolution.y;
-        return localNodeData[idx].isBroken >= 1;
-    }
-
-    private void AddQuad(Vector3 c, Vector3 h, int i0, int i1, int i2, int i3, List<Vector3> verts, List<int> tris)
-    {
-        Vector3[] p = new Vector3[8];
-        p[0] = c + new Vector3(-h.x, -h.y, -h.z);
-        p[1] = c + new Vector3(h.x, -h.y, -h.z);
-        p[2] = c + new Vector3(h.x, h.y, -h.z);
-        p[3] = c + new Vector3(-h.x, h.y, -h.z);
-        p[4] = c + new Vector3(-h.x, -h.y, h.z);
-        p[5] = c + new Vector3(h.x, -h.y, h.z);
-        p[6] = c + new Vector3(h.x, h.y, h.z);
-        p[7] = c + new Vector3(-h.x, h.y, h.z);
-
-        int idx = verts.Count;
-        verts.Add(p[i0]); verts.Add(p[i1]); verts.Add(p[i2]); verts.Add(p[i3]);
-        tris.Add(idx); tris.Add(idx + 1); tris.Add(idx + 2);
-        tris.Add(idx); tris.Add(idx + 2); tris.Add(idx + 3);
+        isMeshReadbackPending = false;
     }
 
     private void SpawnDebris(Node node)
     {
         if (debrisPrefab == null) return;
+
+        // Safety Catch: Prevent any rogue NaN physics glitches from crashing the Unity Editor
+        if (float.IsNaN(node.position.x) || float.IsNaN(node.velocity.x)) return;
 
         Quaternion randomRot = Quaternion.Euler(Random.Range(0, 360), Random.Range(0, 360), Random.Range(0, 360));
         GameObject debris = Instantiate(debrisPrefab, node.position, randomRot);
@@ -362,6 +363,11 @@ public class FEMDestruction : MonoBehaviour
         {
             nodeBuffer.Release();
             nodeBuffer = null;
+        }
+        if (triangleBuffer != null)
+        {
+            triangleBuffer.Release();
+            triangleBuffer = null;
         }
         if (localNodeData.IsCreated) localNodeData.Dispose();
     }
