@@ -574,14 +574,14 @@ PrefabInstance:
     m_AddedComponents:
     - targetCorrespondingSourceObject: {fileID: 7136609354570332379, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
       insertIndex: -1
-      addedObject: {fileID: 2389465832760258193}
+      addedObject: {fileID: 2389465832760258194}
   m_SourcePrefab: {fileID: 100100000, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
 --- !u!1 &2389465832760258192 stripped
 GameObject:
   m_CorrespondingSourceObject: {fileID: 7136609354570332379, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
   m_PrefabInstance: {fileID: 2389465832760258191}
   m_PrefabAsset: {fileID: 0}
---- !u!114 &2389465832760258193
+--- !u!114 &2389465832760258194
 MonoBehaviour:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
@@ -590,16 +590,20 @@ MonoBehaviour:
   m_GameObject: {fileID: 2389465832760258192}
   m_Enabled: 1
   m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: 28ceff7f4aab9d345bc0bb9d79e8a3a5, type: 3}
+  m_Script: {fileID: 11500000, guid: da8474b37a54b5a4995611deb5ea379e, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::FEMDestruction
-  femCompute: {fileID: 7200000, guid: 7805643ff4959cf4dbd2d7b044135cb0, type: 3}
+  m_EditorClassIdentifier: Assembly-CSharp::FEMDestructionCPU
+  femCompute: {fileID: 7200000, guid: b881c799288bd1440b15ee8167b45208, type: 3}
   debrisPrefab: {fileID: 119512, guid: 5578b82f17c954843901e8b68ca21dcc, type: 3}
+  meshSmoothingIterations: 2
   vertexJitterAmount: 0.4
-  nodeResolution: {x: 60, y: 60, z: 10}
+  nodeResolution: {x: 30, y: 30, z: 5}
+  anchorBottomToGround: 1
+  anchorSidesToWalls: 0
+  maxDeformationDistance: 0.6
   stiffness: 5000
-  damping: 50
-  yieldStress: 200
+  damping: 15
+  yieldStress: 300
   impactForceMultiplier: 10
   projectileTag: Cannonball
 --- !u!1001 &8020139810614280795

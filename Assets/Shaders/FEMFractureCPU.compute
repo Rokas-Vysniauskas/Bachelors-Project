@@ -1,0 +1,159 @@
+#pragma kernel ApplyImpact
+#pragma kernel CalculateStress
+#pragma kernel IntegrateAndFracture
+#pragma target 5.0 
+
+struct Node
+{
+    float3 position;
+    float3 restPosition;
+    float3 velocity;
+    float stress;
+    int isBroken;
+    int isAnchor; // NEW: Tells the GPU if this node is bolted to the ground
+};
+
+RWStructuredBuffer<Node> _Nodes;
+
+float _DeltaTime;
+float _Stiffness;
+float _Damping;
+float _YieldStress;
+float _MaxDisplacement; // NEW: The tear-away distance
+int3 _GridResolution;
+float3 _NodeSpacing;
+
+float3 _ImpactPoint;
+float3 _ImpactVelocity;
+float _ImpactRadius;
+float _ImpactMass;
+int _HasImpact;
+
+int GetIndex(int3 coord)
+{
+    if (coord.x < 0 || coord.x >= _GridResolution.x ||
+        coord.y < 0 || coord.y >= _GridResolution.y ||
+        coord.z < 0 || coord.z >= _GridResolution.z)
+    {
+        return -1;
+    }
+    return coord.x + coord.y * _GridResolution.x + coord.z * _GridResolution.x * _GridResolution.y;
+}
+
+[numthreads(8, 8, 8)]
+void ApplyImpact(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
+        return;
+    
+    int index = GetIndex(int3(id.x, id.y, id.z));
+    if (_Nodes[index].isBroken >= 1 || _HasImpact == 0)
+        return;
+
+    float dist = distance(_Nodes[index].position, _ImpactPoint);
+    if (dist < _ImpactRadius)
+    {
+        float falloff = 1.0 - (dist / _ImpactRadius);
+        _Nodes[index].velocity += _ImpactVelocity * _ImpactMass * falloff * _DeltaTime;
+    }
+}
+
+[numthreads(8, 8, 8)]
+void CalculateStress(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
+        return;
+    
+    int index = GetIndex(int3(id.x, id.y, id.z));
+    if (_Nodes[index].isBroken >= 1)
+        return;
+
+    float3 totalForce = float3(0, 0, 0);
+    float localStress = 0.0;
+    float energySink = 1.0;
+
+    int3 offsets[6] =
+    {
+        int3(1, 0, 0), int3(-1, 0, 0),
+        int3(0, 1, 0), int3(0, -1, 0),
+        int3(0, 0, 1), int3(0, 0, -1)
+    };
+
+    float maxStretch = length(_NodeSpacing) * 0.5;
+
+    for (int i = 0; i < 6; i++)
+    {
+        int neighborIndex = GetIndex(int3(id.x, id.y, id.z) + offsets[i]);
+        if (neighborIndex != -1)
+        {
+            if (_Nodes[neighborIndex].isBroken == 0)
+            {
+                float3 currentDir = _Nodes[neighborIndex].position - _Nodes[index].position;
+                float3 restDir = _Nodes[neighborIndex].restPosition - _Nodes[index].restPosition;
+                
+                float currentDist = length(currentDir);
+                float restDist = length(restDir);
+                
+                float displacement = currentDist - restDist;
+                
+                // Clamp displacement to prevent cascading force explosions
+                displacement = clamp(displacement, -maxStretch, maxStretch);
+                
+                float3 forceDir = normalize(currentDir);
+                totalForce += forceDir * (displacement * _Stiffness);
+                localStress += abs(displacement);
+            }
+            else
+            {
+                energySink *= 0.3;
+            }
+        }
+    }
+
+    totalForce -= _Nodes[index].velocity * _Damping;
+    _Nodes[index].velocity += totalForce * _DeltaTime;
+    _Nodes[index].velocity *= energySink;
+    
+    float maxVel = 20.0;
+    if (length(_Nodes[index].velocity) > maxVel)
+    {
+        _Nodes[index].velocity = normalize(_Nodes[index].velocity) * maxVel;
+    }
+
+    _Nodes[index].stress = localStress * _Stiffness;
+}
+
+[numthreads(8, 8, 8)]
+void IntegrateAndFracture(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint) _GridResolution.x || id.y >= (uint) _GridResolution.y || id.z >= (uint) _GridResolution.z)
+        return;
+    
+    int index = GetIndex(int3(id.x, id.y, id.z));
+    if (_Nodes[index].isBroken >= 1)
+        return;
+
+    // NEW: Foundation Anchors refuse to move.
+    if (_Nodes[index].isAnchor == 1)
+    {
+        _Nodes[index].position = _Nodes[index].restPosition;
+        _Nodes[index].velocity = float3(0, 0, 0);
+    }
+    else
+    {
+        _Nodes[index].position += _Nodes[index].velocity * _DeltaTime;
+
+        // NEW: Tear-Away mechanic. If it is pushed too far from its rest position
+        // (meaning it broke off from the anchors), it shatters into debris instantly.
+        if (distance(_Nodes[index].position, _Nodes[index].restPosition) > _MaxDisplacement)
+        {
+            _Nodes[index].isBroken = 1;
+        }
+    }
+
+    // Standard structural failure
+    if (_Nodes[index].stress > _YieldStress)
+    {
+        _Nodes[index].isBroken = 1;
+    }
+}

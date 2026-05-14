@@ -1,0 +1,13 @@
+fileFormatVersion: 2
+guid: da8474b37a54b5a4995611deb5ea379e
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - femCompute: {fileID: 7200000, guid: 7805643ff4959cf4dbd2d7b044135cb0, type: 3}
+  - debrisPrefab: {instanceID: 0}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
