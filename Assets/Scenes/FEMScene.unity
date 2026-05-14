@@ -505,6 +505,10 @@ PrefabInstance:
     m_TransformParent: {fileID: 0}
     m_Modifications:
     - target: {fileID: 1443081786160720780, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
+      propertyPath: m_Mass
+      value: 10000
+      objectReference: {fileID: 0}
+    - target: {fileID: 1443081786160720780, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
       propertyPath: m_Constraints
       value: 126
       objectReference: {fileID: 0}
@@ -595,14 +599,15 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FEMDestruction
   femCompute: {fileID: 7200000, guid: 7805643ff4959cf4dbd2d7b044135cb0, type: 3}
   debrisPrefab: {fileID: 119512, guid: 5578b82f17c954843901e8b68ca21dcc, type: 3}
-  vertexJitterAmount: 1
-  nodeResolution: {x: 60, y: 60, z: 10}
+  vertexJitterAmount: 0.5
+  nodeResolution: {x: 30, y: 30, z: 5}
   anchorBottomToGround: 1
   anchorSidesToWalls: 0
-  maxDeformationDistance: 1
+  maxDeformationDistance: 0.1
   stiffness: 5000
-  damping: 15
+  damping: 20
   yieldStress: 500
+  minRequiredNeighbors: 2
   impactForceMultiplier: 10
   projectileTag: Cannonball
 --- !u!1001 &8020139810614280795

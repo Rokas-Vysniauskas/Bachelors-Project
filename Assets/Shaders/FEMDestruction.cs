@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Unity.Collections;
@@ -10,27 +9,41 @@ using System.Runtime.InteropServices;
 public class FEMDestruction : MonoBehaviour
 {
     [Header("Compute Shader (REQUIRED)")]
+    [Tooltip("The core logic file running on the GPU.")]
     public ComputeShader femCompute;
 
     [Header("Destruction Visuals")]
+    [Tooltip("The physical object spawned when a chunk breaks. Use a jagged rock, not a cube.")]
     public GameObject debrisPrefab;
-    [Range(0f, 1f)] public float vertexJitterAmount = 0.4f;
+    [Tooltip("Scrambles the internal voxel grid to look like jagged, broken concrete. 0 is flat cubes, 1 is extreme spikes.")]
+    [Range(0f, 1f)] public float vertexJitterAmount = 0.5f;
 
     [Header("FEM Resolution")]
-    public Vector3Int nodeResolution = new Vector3Int(40, 40, 10);
+    [Tooltip("How many nodes to generate. Higher numbers mean smaller debris but demand more CPU/GPU power.")]
+    public Vector3Int nodeResolution = new Vector3Int(60, 60, 10);
 
     [Header("Structural Integrity")]
+    [Tooltip("Bolts the bottom row of nodes to the ground so the wall has a foundation.")]
     public bool anchorBottomToGround = true;
+    [Tooltip("Bolts the sides of the wall to the environment.")]
     public bool anchorSidesToWalls = false;
+    [Tooltip("If the impact physically stretches a chunk this far from its starting point, it snaps into debris.")]
     public float maxDeformationDistance = 0.6f;
 
     [Header("Physics Settings")]
+    [Tooltip("How rigid the springs are. 5000+ is like concrete. 500 is like jello.")]
     public float stiffness = 5000f;
+    [Tooltip("Slows down vibrations inside the wall. High damping stops the wall from wobbling visibly.")]
     public float damping = 15f;
+    [Tooltip("The amount of accumulated stress required to break a spring. Lower means bigger craters.")]
     public float yieldStress = 500f;
+    [Tooltip("If a chunk loses this many connections to the surrounding wall, it immediately collapses into debris. Fixes floating islands.")]
+    public int minRequiredNeighbors = 2;
+    [Tooltip("Artificially multiplies the kinetic energy of the incoming projectile.")]
     public float impactForceMultiplier = 1.0f;
 
     [Header("Physics Filter")]
+    [Tooltip("Only break the wall if hit by an object with this tag.")]
     public string projectileTag = "Cannonball";
 
     [StructLayout(LayoutKind.Sequential)]
@@ -48,10 +61,8 @@ public class FEMDestruction : MonoBehaviour
         public int isValid;
     }
 
-    private ComputeBuffer nodeBuffer;
-    private ComputeBuffer triangleBuffer;
-    private int totalNodes;
-    private int maxTriangles;
+    private ComputeBuffer nodeBuffer, triangleBuffer;
+    private int totalNodes, maxTriangles;
     private int kernelApplyImpact, kernelCalculateStress, kernelIntegrate, kernelGenerateMesh, kernelClearMesh;
     private Vector3Int threadGroups;
     private Vector3 calculatedNodeSpacing;
@@ -118,13 +129,11 @@ public class FEMDestruction : MonoBehaviour
             }
         }
 
-        int nodeStride = Marshal.SizeOf(typeof(Node));
-        nodeBuffer = new ComputeBuffer(totalNodes, nodeStride);
+        nodeBuffer = new ComputeBuffer(totalNodes, Marshal.SizeOf(typeof(Node)));
         nodeBuffer.SetData(initialNodes);
 
         maxTriangles = totalNodes * 12;
-        int triStride = Marshal.SizeOf(typeof(OutputTriangle));
-        triangleBuffer = new ComputeBuffer(maxTriangles, triStride, ComputeBufferType.Append);
+        triangleBuffer = new ComputeBuffer(maxTriangles, Marshal.SizeOf(typeof(OutputTriangle)), ComputeBufferType.Append);
 
         kernelApplyImpact = femCompute.FindKernel("ApplyImpact");
         kernelCalculateStress = femCompute.FindKernel("CalculateStress");
@@ -135,7 +144,6 @@ public class FEMDestruction : MonoBehaviour
         femCompute.SetBuffer(kernelApplyImpact, "_Nodes", nodeBuffer);
         femCompute.SetBuffer(kernelCalculateStress, "_Nodes", nodeBuffer);
         femCompute.SetBuffer(kernelIntegrate, "_Nodes", nodeBuffer);
-
         femCompute.SetBuffer(kernelGenerateMesh, "_Nodes", nodeBuffer);
         femCompute.SetBuffer(kernelGenerateMesh, "_WallTriangles", triangleBuffer);
 
@@ -187,6 +195,7 @@ public class FEMDestruction : MonoBehaviour
         femCompute.SetFloat("_Damping", damping);
         femCompute.SetFloat("_YieldStress", yieldStress);
         femCompute.SetFloat("_MaxDisplacement", maxDeformationDistance);
+        femCompute.SetInt("_MinNeighbors", minRequiredNeighbors);
 
         if (hasImpactThisFrame)
         {
@@ -230,13 +239,6 @@ public class FEMDestruction : MonoBehaviour
             Node node = localNodeData[i];
             if (node.isBroken == 1)
             {
-                if (!isWallHidden)
-                {
-                    GetComponent<MeshRenderer>().enabled = false;
-                    GetComponent<Collider>().enabled = false;
-                    isWallHidden = true;
-                }
-
                 SpawnDebris(node);
 
                 Node updatedNode = node;
@@ -261,16 +263,12 @@ public class FEMDestruction : MonoBehaviour
     {
         isMeshReadbackPending = true;
 
-        // 1. Instantly wipe the buffer clean on the GPU (No ghost triangles!)
         femCompute.SetBuffer(kernelClearMesh, "_WallTrianglesRW", triangleBuffer);
         femCompute.SetInt("_MaxTriangles", maxTriangles);
-        int threadGroupsClear = Mathf.CeilToInt(maxTriangles / 64f);
-        femCompute.Dispatch(kernelClearMesh, threadGroupsClear, 1, 1);
+        femCompute.Dispatch(kernelClearMesh, Mathf.CeilToInt(maxTriangles / 64f), 1, 1);
 
-        // 2. Reset Append Counter
         triangleBuffer.SetCounterValue(0);
 
-        // 3. Generate fresh mesh
         femCompute.SetFloat("_JitterAmount", vertexJitterAmount);
         femCompute.Dispatch(kernelGenerateMesh, threadGroups.x, threadGroups.y, threadGroups.z);
 
@@ -300,32 +298,38 @@ public class FEMDestruction : MonoBehaviour
                 proceduralWallObj.transform.localRotation = Quaternion.identity;
                 proceduralWallObj.transform.localScale = Vector3.one;
 
-                var mf = proceduralWallObj.AddComponent<MeshFilter>();
-                mf.mesh = proceduralMesh;
-                var mr = proceduralWallObj.AddComponent<MeshRenderer>();
-                mr.materials = GetComponent<MeshRenderer>().sharedMaterials;
+                proceduralWallObj.AddComponent<MeshFilter>().mesh = proceduralMesh;
+                proceduralWallObj.AddComponent<MeshRenderer>().materials = GetComponent<MeshRenderer>().sharedMaterials;
 
                 var col = proceduralWallObj.AddComponent<MeshCollider>();
-                col.convex = true;
+                col.convex = false;
             }
         }
 
-        List<Vector3> verts = new List<Vector3>(gpuTriangles.Length * 3);
-        List<int> tris = new List<int>(gpuTriangles.Length * 3);
+        int validTriCount = 0;
+        for (int i = 0; i < gpuTriangles.Length; i++)
+        {
+            if (gpuTriangles[i].isValid == 1) validTriCount++;
+        }
+
+        Vector3[] verts = new Vector3[validTriCount * 3];
+        int[] tris = new int[validTriCount * 3];
+        int vIdx = 0;
 
         for (int i = 0; i < gpuTriangles.Length; i++)
         {
-            // The ultimate validity check. Rejects any uninitialized memory.
-            if (gpuTriangles[i].isValid == 0) continue;
+            if (gpuTriangles[i].isValid == 1)
+            {
+                verts[vIdx] = gpuTriangles[i].v0;
+                verts[vIdx + 1] = gpuTriangles[i].v1;
+                verts[vIdx + 2] = gpuTriangles[i].v2;
 
-            int idx = verts.Count;
-            verts.Add(gpuTriangles[i].v0);
-            verts.Add(gpuTriangles[i].v1);
-            verts.Add(gpuTriangles[i].v2);
+                tris[vIdx] = vIdx;
+                tris[vIdx + 1] = vIdx + 1;
+                tris[vIdx + 2] = vIdx + 2;
 
-            tris.Add(idx);
-            tris.Add(idx + 1);
-            tris.Add(idx + 2);
+                vIdx += 3;
+            }
         }
 
         proceduralMesh.Clear();
@@ -337,14 +341,19 @@ public class FEMDestruction : MonoBehaviour
         colMesh.sharedMesh = null;
         colMesh.sharedMesh = proceduralMesh;
 
+        if (!isWallHidden)
+        {
+            GetComponent<MeshRenderer>().enabled = false;
+            GetComponent<Collider>().enabled = false;
+            isWallHidden = true;
+        }
+
         isMeshReadbackPending = false;
     }
 
     private void SpawnDebris(Node node)
     {
         if (debrisPrefab == null) return;
-
-        // Safety Catch: Prevent any rogue NaN physics glitches from crashing the Unity Editor
         if (float.IsNaN(node.position.x) || float.IsNaN(node.velocity.x)) return;
 
         Quaternion randomRot = Quaternion.Euler(Random.Range(0, 360), Random.Range(0, 360), Random.Range(0, 360));
@@ -359,16 +368,8 @@ public class FEMDestruction : MonoBehaviour
 
     private void OnDisable()
     {
-        if (nodeBuffer != null)
-        {
-            nodeBuffer.Release();
-            nodeBuffer = null;
-        }
-        if (triangleBuffer != null)
-        {
-            triangleBuffer.Release();
-            triangleBuffer = null;
-        }
+        if (nodeBuffer != null) nodeBuffer.Release();
+        if (triangleBuffer != null) triangleBuffer.Release();
         if (localNodeData.IsCreated) localNodeData.Dispose();
     }
 }
