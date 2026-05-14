@@ -68,6 +68,7 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
 
     float3 totalForce = float3(0, 0, 0);
     float localStress = 0.0;
+    float energySink = 1.0;
 
     int3 offsets[6] =
     {
@@ -76,30 +77,44 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
         int3(0, 0, 1), int3(0, 0, -1)
     };
 
+    // Calculate maximum allowable stretch before the math breaks
+    float maxStretch = length(_NodeSpacing) * 0.5;
+
     for (int i = 0; i < 6; i++)
     {
         int neighborIndex = GetIndex(int3(id.x, id.y, id.z) + offsets[i]);
-        if (neighborIndex != -1 && _Nodes[neighborIndex].isBroken == 0)
+        if (neighborIndex != -1)
         {
-            float3 currentDir = _Nodes[neighborIndex].position - _Nodes[index].position;
-            float3 restDir = _Nodes[neighborIndex].restPosition - _Nodes[index].restPosition;
-            
-            float currentDist = length(currentDir);
-            float restDist = length(restDir);
-            
-            float displacement = currentDist - restDist;
-            float3 forceDir = normalize(currentDir);
-            
-            totalForce += forceDir * (displacement * _Stiffness);
-            localStress += abs(displacement);
+            if (_Nodes[neighborIndex].isBroken == 0)
+            {
+                float3 currentDir = _Nodes[neighborIndex].position - _Nodes[index].position;
+                float3 restDir = _Nodes[neighborIndex].restPosition - _Nodes[index].restPosition;
+                
+                float currentDist = length(currentDir);
+                float restDist = length(restDir);
+                
+                float displacement = currentDist - restDist;
+                
+                // PHYSICS FIX: Clamp the displacement. This stops the infinite force 
+                // accumulation that causes the wall to explode when neighbors vanish.
+                displacement = clamp(displacement, -maxStretch, maxStretch);
+                
+                float3 forceDir = normalize(currentDir);
+                totalForce += forceDir * (displacement * _Stiffness);
+                localStress += abs(displacement);
+            }
+            else
+            {
+                energySink *= 0.3;
+            }
         }
     }
 
     totalForce -= _Nodes[index].velocity * _Damping;
     _Nodes[index].velocity += totalForce * _DeltaTime;
+    _Nodes[index].velocity *= energySink;
     
-    // SAFETY CLAMP: Prevents explosive chain reactions in the lattice
-    float maxVel = 50.0;
+    float maxVel = 20.0;
     if (length(_Nodes[index].velocity) > maxVel)
     {
         _Nodes[index].velocity = normalize(_Nodes[index].velocity) * maxVel;
