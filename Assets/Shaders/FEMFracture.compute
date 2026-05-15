@@ -13,7 +13,7 @@ struct Node
     float stress;
     int isBroken;
     int isAnchor;
-    int anchorDistance; // NEW: Topological distance to the ground
+    int anchorDistance;
 };
 
 struct OutputTriangle
@@ -35,7 +35,7 @@ float _ImpactRadius, _ImpactMass;
 int _HasImpact;
 
 float3 _BoxMin, _BoxMax;
-float _JitterAmount;
+float _JitterAmount, _EdgeSmoothing;
 uint _MaxTriangles;
 
 int GetIndex(int3 coord)
@@ -45,12 +45,74 @@ int GetIndex(int3 coord)
     return coord.x + coord.y * _GridResolution.x + coord.z * _GridResolution.x * _GridResolution.y;
 }
 
+bool IsEmpty(int3 coord)
+{
+    if (coord.x < 0 || coord.x >= _GridResolution.x || coord.y < 0 || coord.y >= _GridResolution.y || coord.z < 0 || coord.z >= _GridResolution.z)
+        return true;
+    return _Nodes[GetIndex(coord)].isBroken >= 1;
+}
+
+// -------------------------------------------------------------------------
+// Mesh ANTI-ALIASING (Surface Nets Approximation) + Jitter
+// -------------------------------------------------------------------------
 float3 GetJitteredVertex(float3 pos, float maxJitter)
 {
+    int3 gridPos = round((pos - _BoxMin) / _NodeSpacing);
+
+    float3 solidCenterSum = float3(0, 0, 0);
+    int solidCount = 0;
+
+    // Check the 8 surrounding voxels that share this specific vertex
+    for (int x = -1; x <= 0; x++)
+    {
+        for (int y = -1; y <= 0; y++)
+        {
+            for (int z = -1; z <= 0; z++)
+            {
+                int3 checkCoord = gridPos + int3(x, y, z);
+                
+                if (!IsEmpty(checkCoord))
+                {
+                    float3 voxelCenter = _BoxMin + (_NodeSpacing / 2.0) + (float3(checkCoord) * _NodeSpacing);
+                    solidCenterSum += voxelCenter;
+                    solidCount++;
+                }
+            }
+        }
+    }
+
+    // 1. Identify if this vertex sits exactly on the original pristine wall boundaries
+    bool onMinX = abs(pos.x - _BoxMin.x) < 0.001f;
+    bool onMaxX = abs(pos.x - _BoxMax.x) < 0.001f;
+    bool onMinY = abs(pos.y - _BoxMin.y) < 0.001f;
+    bool onMaxY = abs(pos.y - _BoxMax.y) < 0.001f;
+    bool onMinZ = abs(pos.z - _BoxMin.z) < 0.001f;
+    bool onMaxZ = abs(pos.z - _BoxMax.z) < 0.001f;
+
+    float3 finalPos = pos;
+
+    // 2. Apply Laplacian Surface Nets (Smoothing)
+    if (solidCount > 0 && solidCount < 8 && _EdgeSmoothing > 0.0)
+    {
+        float3 averageSolidCenter = solidCenterSum / (float) solidCount;
+        finalPos = lerp(pos, averageSolidCenter, _EdgeSmoothing);
+    }
+
+    // 3. THE BOUNDARY LOCK: If the vertex started on the outer boundary, DO NOT allow 
+    // the smoothing to pull it inward. This forces the vertex to slide strictly in 2D 
+    // along the flat surface (closing the cracks) instead of creating wavy dents.
+    if (onMinX || onMaxX)
+        finalPos.x = pos.x;
+    if (onMinY || onMaxY)
+        finalPos.y = pos.y;
+    if (onMinZ || onMaxZ)
+        finalPos.z = pos.z;
+
+    // 4. Coherent Trigonometric Noise for organic concrete bumps
     float freq = 4.0;
-    float nx = sin(pos.y * freq) * cos(pos.z * freq);
-    float ny = sin(pos.x * freq) * cos(pos.z * freq);
-    float nz = sin(pos.x * freq) * cos(pos.y * freq);
+    float nx = sin(finalPos.y * freq) * cos(finalPos.z * freq);
+    float ny = sin(finalPos.x * freq) * cos(finalPos.z * freq);
+    float nz = sin(finalPos.x * freq) * cos(finalPos.y * freq);
     float3 noiseVec = float3(nx, ny, nz) * 0.5;
 
     float boundDistX = min(abs(pos.x - _BoxMin.x), abs(pos.x - _BoxMax.x));
@@ -58,8 +120,17 @@ float3 GetJitteredVertex(float3 pos, float maxJitter)
     float boundDistZ = min(abs(pos.z - _BoxMin.z), abs(pos.z - _BoxMax.z));
     float minDist = min(boundDistX, min(boundDistY, boundDistZ));
     
+    // Seamlessly blend the flat outer wall with the jagged interior crater
     float edgeBlend = smoothstep(0.01, 0.15, minDist);
-    return pos + noiseVec * maxJitter * edgeBlend;
+    
+    finalPos += noiseVec * maxJitter * edgeBlend;
+
+    // 5. Final safety clamp
+    finalPos.x = clamp(finalPos.x, _BoxMin.x, _BoxMax.x);
+    finalPos.y = clamp(finalPos.y, _BoxMin.y, _BoxMax.y);
+    finalPos.z = clamp(finalPos.z, _BoxMin.z, _BoxMax.z);
+
+    return finalPos;
 }
 
 void AppendQuad(float3 c, float3 h, int i0, int i1, int i2, int i3, float3 normal)
@@ -91,13 +162,6 @@ void AppendQuad(float3 c, float3 h, int i0, int i1, int i2, int i3, float3 norma
 
     _WallTriangles.Append(t1);
     _WallTriangles.Append(t2);
-}
-
-bool IsEmpty(int3 coord)
-{
-    if (coord.x < 0 || coord.x >= _GridResolution.x || coord.y < 0 || coord.y >= _GridResolution.y || coord.z < 0 || coord.z >= _GridResolution.z)
-        return true;
-    return _Nodes[GetIndex(coord)].isBroken >= 1;
 }
 
 [numthreads(64, 1, 1)]
@@ -152,7 +216,7 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
         int neighborIndex = GetIndex(int3(id.x, id.y, id.z) + offsets[i]);
         if (neighborIndex != -1 && _Nodes[neighborIndex].isBroken == 0)
         {
-            // Find the shortest path to an anchor
+            // Topology Logic: Find the shortest path to an anchor node
             minNeighborDistance = min(minNeighborDistance, _Nodes[neighborIndex].anchorDistance);
 
             float3 currentDir = _Nodes[neighborIndex].position - _Nodes[index].position;
@@ -161,6 +225,7 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
             float currentDist = length(currentDir);
             float restDist = length(restDir);
             
+            // Prevent NaN explosion from zero distance
             if (currentDist > 0.0001f)
             {
                 float displacement = clamp(currentDist - restDist, -maxStretch, maxStretch);
@@ -171,22 +236,19 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    // THE TOPOLOGY ALGORITHM
     if (_Nodes[index].isAnchor == 1)
     {
-        _Nodes[index].anchorDistance = 0; // Anchors are distance 0
+        _Nodes[index].anchorDistance = 0; // Anchors are firmly locked at 0
     }
     else
     {
-        // I am 1 hop further away than my closest connected neighbor
+        // Hop counter to calculate physical connection to the foundation
         _Nodes[index].anchorDistance = min(minNeighborDistance + 1, 999999);
     }
 
-    // The maximum possible physical hops across the entire grid
     int maxValidDistance = _GridResolution.x + _GridResolution.y + _GridResolution.z;
 
-    // If my distance exceeds the physical limits of the grid, it means I am trapped in an infinite 
-    // counting loop with other floating nodes. I am an island, so I must shatter.
+    // Floating Island detection: if distance exceeds grid limits, it has lost connection
     if (_Nodes[index].anchorDistance > maxValidDistance)
     {
         _Nodes[index].stress = _YieldStress + 1000.0;
@@ -199,6 +261,7 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
     totalForce -= _Nodes[index].velocity * _Damping;
     _Nodes[index].velocity += totalForce * _DeltaTime;
     
+    // Safety clamp to prevent chaotic physics tearing
     float maxVel = 25.0;
     if (length(_Nodes[index].velocity) > maxVel)
     {
@@ -223,11 +286,15 @@ void IntegrateAndFracture(uint3 id : SV_DispatchThreadID)
     else
     {
         _Nodes[index].position += _Nodes[index].velocity * _DeltaTime;
+        
+        // Elastic snap limit
         if (distance(_Nodes[index].position, _Nodes[index].restPosition) > _MaxDisplacement)
         {
             _Nodes[index].isBroken = 1;
         }
     }
+    
+    // Normal stress failure
     if (_Nodes[index].stress > _YieldStress)
         _Nodes[index].isBroken = 1;
 }

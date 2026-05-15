@@ -10,39 +10,51 @@ using System.Runtime.InteropServices;
 public class FEMDestruction : MonoBehaviour
 {
     [Header("Compute Shader (REQUIRED)")]
+    [Tooltip("The core logic file running on the GPU.")]
     public ComputeShader femCompute;
 
     [Header("Destruction Visuals")]
+    [Tooltip("The physical object spawned when a chunk breaks. Use a jagged rock prefab, not a cube.")]
     public GameObject debrisPrefab;
-    [Tooltip("Scrambles the internal voxel grid to look like jagged, broken concrete.")]
+    [Tooltip("Scrambles the internal voxel grid to look like jagged, broken concrete. 0 is flat cubes, 1 is extreme spikes.")]
     [Range(0f, 1f)] public float vertexJitterAmount = 0.5f;
-    [Tooltip("Melts the pixelated voxel edges into smooth, rounded concrete. Set to 1 or 2 for high realism.")]
-    [Range(0, 3)] public int meshSmoothingIterations = 1;
+    [Tooltip("The Anti-Aliasing effect running on the GPU. 0 = Minecraft blocks. 100 = Completely melted, smooth concrete slopes.")]
+    [Range(0f, 100f)] public float craterEdgeSmoothing = 60f;
 
     [Header("FEM Resolution")]
+    [Tooltip("How many nodes to generate. Higher numbers mean smaller debris but demand more GPU power.")]
     public Vector3Int nodeResolution = new Vector3Int(40, 40, 6);
 
     [Header("Structural Integrity")]
+    [Tooltip("Bolts the bottom row of nodes to the ground so the wall has a foundation.")]
     public bool anchorBottomToGround = true;
+    [Tooltip("Bolts the left and right sides of the wall to the environment.")]
     public bool anchorSidesToWalls = false;
+    [Tooltip("If the impact physically stretches a chunk this far from its starting point, it snaps into debris.")]
     public float maxDeformationDistance = 0.6f;
 
     [Header("Physics Settings")]
+    [Tooltip("How rigid the springs are. 5000+ is like concrete. 500 is like jello.")]
     public float stiffness = 5000f;
+    [Tooltip("Slows down vibrations inside the wall. High damping stops the wall from wobbling visibly.")]
     public float damping = 15f;
+    [Tooltip("The amount of accumulated stress required to break a spring. Lower means bigger craters.")]
     public float yieldStress = 500f;
+    [Tooltip("Artificially multiplies the kinetic energy of the incoming projectile.")]
     public float impactForceMultiplier = 1.0f;
 
     [Header("Physics Filter")]
+    [Tooltip("Only break the wall if hit by an object with this tag.")]
     public string projectileTag = "Cannonball";
 
+    // Matches the layout in the HLSL Compute Shader
     [StructLayout(LayoutKind.Sequential)]
     private struct Node
     {
         public Vector3 position, restPosition, velocity;
         public float stress;
         public int isBroken, isAnchor;
-        public int anchorDistance;
+        public int anchorDistance; // Topological distance to the ground
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -73,6 +85,7 @@ public class FEMDestruction : MonoBehaviour
 
     private void Start()
     {
+        // Extract bounds from the visual mesh and secure the Rigidbody
         localBounds = GetComponent<MeshFilter>().sharedMesh.bounds;
         Rigidbody rb = GetComponent<Rigidbody>();
         if (rb != null) rb.isKinematic = true;
@@ -115,7 +128,7 @@ public class FEMDestruction : MonoBehaviour
                         stress = 0f,
                         isBroken = 0,
                         isAnchor = isAnchored,
-                        anchorDistance = 0 // FIX: All nodes start at 0 so they don't violently explode on Frame 1. The GPU will map their true distances on Frame 2.
+                        anchorDistance = 0 // All nodes start at 0 to prevent frame-1 topological explosions
                     };
                 }
             }
@@ -124,7 +137,7 @@ public class FEMDestruction : MonoBehaviour
         nodeBuffer = new ComputeBuffer(totalNodes, Marshal.SizeOf(typeof(Node)));
         nodeBuffer.SetData(initialNodes);
 
-        maxTriangles = totalNodes * 12;
+        maxTriangles = totalNodes * 12; // Absolute max triangles for a full voxel grid
         triangleBuffer = new ComputeBuffer(maxTriangles, Marshal.SizeOf(typeof(OutputTriangle)), ComputeBufferType.Append);
 
         kernelApplyImpact = femCompute.FindKernel("ApplyImpact");
@@ -228,10 +241,13 @@ public class FEMDestruction : MonoBehaviour
         for (int i = 0; i < totalNodes; i++)
         {
             Node node = localNodeData[i];
+
+            // If the GPU marked this node as newly broken (1)
             if (node.isBroken == 1)
             {
                 SpawnDebris(node);
 
+                // Mark as processed (2) so we don't spawn debris for it again
                 Node updatedNode = node;
                 updatedNode.isBroken = 2;
                 localNodeData[i] = updatedNode;
@@ -254,15 +270,22 @@ public class FEMDestruction : MonoBehaviour
     {
         isMeshReadbackPending = true;
 
+        // 1. Wipe the GPU buffer clean to prevent ghost triangles
         femCompute.SetBuffer(kernelClearMesh, "_WallTrianglesRW", triangleBuffer);
         femCompute.SetInt("_MaxTriangles", maxTriangles);
         femCompute.Dispatch(kernelClearMesh, Mathf.CeilToInt(maxTriangles / 64f), 1, 1);
 
+        // 2. Reset Append Counter
         triangleBuffer.SetCounterValue(0);
 
+        // 3. Send rendering variables
         femCompute.SetFloat("_JitterAmount", vertexJitterAmount);
+        femCompute.SetFloat("_EdgeSmoothing", craterEdgeSmoothing / 100f);
+
+        // 4. Generate the mesh purely on the GPU
         femCompute.Dispatch(kernelGenerateMesh, threadGroups.x, threadGroups.y, threadGroups.z);
 
+        // 5. Read back the final geometry
         AsyncGPUReadback.Request(triangleBuffer, OnMeshReadbackComplete);
     }
 
@@ -274,7 +297,10 @@ public class FEMDestruction : MonoBehaviour
             return;
         }
 
-        OutputTriangle[] gpuTriangles = request.GetData<OutputTriangle>().ToArray();
+        // PERFORMANCE FIX: Iterate directly over the NativeArray!
+        // Calling .ToArray() was allocating massive amounts of RAM and causing the stutter.
+        NativeArray<OutputTriangle> gpuTriangles = request.GetData<OutputTriangle>();
+        int triangleCount = gpuTriangles.Length;
 
         if (proceduralMesh == null)
         {
@@ -298,7 +324,7 @@ public class FEMDestruction : MonoBehaviour
         }
 
         int validTriCount = 0;
-        for (int i = 0; i < gpuTriangles.Length; i++)
+        for (int i = 0; i < triangleCount; i++)
         {
             if (gpuTriangles[i].isValid == 1) validTriCount++;
         }
@@ -307,13 +333,14 @@ public class FEMDestruction : MonoBehaviour
         int[] tris = new int[validTriCount * 3];
         int vIdx = 0;
 
-        for (int i = 0; i < gpuTriangles.Length; i++)
+        for (int i = 0; i < triangleCount; i++)
         {
             if (gpuTriangles[i].isValid == 1)
             {
-                verts[vIdx] = gpuTriangles[i].v0;
-                verts[vIdx + 1] = gpuTriangles[i].v1;
-                verts[vIdx + 2] = gpuTriangles[i].v2;
+                OutputTriangle tri = gpuTriangles[i];
+                verts[vIdx] = tri.v0;
+                verts[vIdx + 1] = tri.v1;
+                verts[vIdx + 2] = tri.v2;
 
                 tris[vIdx] = vIdx;
                 tris[vIdx + 1] = vIdx + 1;
@@ -321,11 +348,6 @@ public class FEMDestruction : MonoBehaviour
 
                 vIdx += 3;
             }
-        }
-
-        if (meshSmoothingIterations > 0)
-        {
-            ApplyLaplacianSmoothing(verts, meshSmoothingIterations);
         }
 
         proceduralMesh.Clear();
@@ -347,43 +369,11 @@ public class FEMDestruction : MonoBehaviour
         isMeshReadbackPending = false;
     }
 
-    private void ApplyLaplacianSmoothing(Vector3[] vertices, int iterations)
-    {
-        Dictionary<Vector3, List<int>> sharedVertices = new Dictionary<Vector3, List<int>>();
-
-        for (int i = 0; i < vertices.Length; i++)
-        {
-            Vector3 rounded = new Vector3(Mathf.Round(vertices[i].x * 100f) / 100f, Mathf.Round(vertices[i].y * 100f) / 100f, Mathf.Round(vertices[i].z * 100f) / 100f);
-            if (!sharedVertices.ContainsKey(rounded)) sharedVertices[rounded] = new List<int>();
-            sharedVertices[rounded].Add(i);
-        }
-
-        for (int iter = 0; iter < iterations; iter++)
-        {
-            Vector3[] newVertices = (Vector3[])vertices.Clone();
-            foreach (var kvp in sharedVertices)
-            {
-                Vector3 pos = kvp.Key;
-                if (Mathf.Abs(pos.x - localBounds.max.x) < 0.1f || Mathf.Abs(pos.x - localBounds.min.x) < 0.1f ||
-                    Mathf.Abs(pos.y - localBounds.max.y) < 0.1f || Mathf.Abs(pos.y - localBounds.min.y) < 0.1f ||
-                    Mathf.Abs(pos.z - localBounds.max.z) < 0.1f || Mathf.Abs(pos.z - localBounds.min.z) < 0.1f)
-                {
-                    continue;
-                }
-
-                Vector3 sum = Vector3.zero;
-                foreach (int index in kvp.Value) sum += vertices[index];
-                Vector3 average = sum / kvp.Value.Count;
-
-                foreach (int index in kvp.Value) newVertices[index] = Vector3.Lerp(vertices[index], average, 0.5f);
-            }
-            vertices = newVertices;
-        }
-    }
-
     private void SpawnDebris(Node node)
     {
         if (debrisPrefab == null) return;
+
+        // Prevent GPU Math errors from crashing Unity
         if (float.IsNaN(node.position.x) || float.IsNaN(node.velocity.x)) return;
 
         Quaternion randomRot = Quaternion.Euler(Random.Range(0, 360), Random.Range(0, 360), Random.Range(0, 360));
