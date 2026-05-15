@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Rendering;
 using Unity.Collections;
@@ -9,41 +10,30 @@ using System.Runtime.InteropServices;
 public class FEMDestruction : MonoBehaviour
 {
     [Header("Compute Shader (REQUIRED)")]
-    [Tooltip("The core logic file running on the GPU.")]
     public ComputeShader femCompute;
 
     [Header("Destruction Visuals")]
-    [Tooltip("The physical object spawned when a chunk breaks. Use a jagged rock, not a cube.")]
     public GameObject debrisPrefab;
-    [Tooltip("Scrambles the internal voxel grid to look like jagged, broken concrete. 0 is flat cubes, 1 is extreme spikes.")]
+    [Tooltip("Scrambles the internal voxel grid to look like jagged, broken concrete.")]
     [Range(0f, 1f)] public float vertexJitterAmount = 0.5f;
+    [Tooltip("Melts the pixelated voxel edges into smooth, rounded concrete. Set to 1 or 2 for high realism.")]
+    [Range(0, 3)] public int meshSmoothingIterations = 1;
 
     [Header("FEM Resolution")]
-    [Tooltip("How many nodes to generate. Higher numbers mean smaller debris but demand more CPU/GPU power.")]
-    public Vector3Int nodeResolution = new Vector3Int(60, 60, 10);
+    public Vector3Int nodeResolution = new Vector3Int(40, 40, 6);
 
     [Header("Structural Integrity")]
-    [Tooltip("Bolts the bottom row of nodes to the ground so the wall has a foundation.")]
     public bool anchorBottomToGround = true;
-    [Tooltip("Bolts the sides of the wall to the environment.")]
     public bool anchorSidesToWalls = false;
-    [Tooltip("If the impact physically stretches a chunk this far from its starting point, it snaps into debris.")]
     public float maxDeformationDistance = 0.6f;
 
     [Header("Physics Settings")]
-    [Tooltip("How rigid the springs are. 5000+ is like concrete. 500 is like jello.")]
     public float stiffness = 5000f;
-    [Tooltip("Slows down vibrations inside the wall. High damping stops the wall from wobbling visibly.")]
     public float damping = 15f;
-    [Tooltip("The amount of accumulated stress required to break a spring. Lower means bigger craters.")]
     public float yieldStress = 500f;
-    [Tooltip("If a chunk loses this many connections to the surrounding wall, it immediately collapses into debris. Fixes floating islands.")]
-    public int minRequiredNeighbors = 2;
-    [Tooltip("Artificially multiplies the kinetic energy of the incoming projectile.")]
     public float impactForceMultiplier = 1.0f;
 
     [Header("Physics Filter")]
-    [Tooltip("Only break the wall if hit by an object with this tag.")]
     public string projectileTag = "Cannonball";
 
     [StructLayout(LayoutKind.Sequential)]
@@ -52,6 +42,7 @@ public class FEMDestruction : MonoBehaviour
         public Vector3 position, restPosition, velocity;
         public float stress;
         public int isBroken, isAnchor;
+        public int anchorDistance;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -123,7 +114,8 @@ public class FEMDestruction : MonoBehaviour
                         velocity = Vector3.zero,
                         stress = 0f,
                         isBroken = 0,
-                        isAnchor = isAnchored
+                        isAnchor = isAnchored,
+                        anchorDistance = 0 // FIX: All nodes start at 0 so they don't violently explode on Frame 1. The GPU will map their true distances on Frame 2.
                     };
                 }
             }
@@ -195,7 +187,6 @@ public class FEMDestruction : MonoBehaviour
         femCompute.SetFloat("_Damping", damping);
         femCompute.SetFloat("_YieldStress", yieldStress);
         femCompute.SetFloat("_MaxDisplacement", maxDeformationDistance);
-        femCompute.SetInt("_MinNeighbors", minRequiredNeighbors);
 
         if (hasImpactThisFrame)
         {
@@ -332,6 +323,11 @@ public class FEMDestruction : MonoBehaviour
             }
         }
 
+        if (meshSmoothingIterations > 0)
+        {
+            ApplyLaplacianSmoothing(verts, meshSmoothingIterations);
+        }
+
         proceduralMesh.Clear();
         proceduralMesh.SetVertices(verts);
         proceduralMesh.SetTriangles(tris, 0);
@@ -349,6 +345,40 @@ public class FEMDestruction : MonoBehaviour
         }
 
         isMeshReadbackPending = false;
+    }
+
+    private void ApplyLaplacianSmoothing(Vector3[] vertices, int iterations)
+    {
+        Dictionary<Vector3, List<int>> sharedVertices = new Dictionary<Vector3, List<int>>();
+
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            Vector3 rounded = new Vector3(Mathf.Round(vertices[i].x * 100f) / 100f, Mathf.Round(vertices[i].y * 100f) / 100f, Mathf.Round(vertices[i].z * 100f) / 100f);
+            if (!sharedVertices.ContainsKey(rounded)) sharedVertices[rounded] = new List<int>();
+            sharedVertices[rounded].Add(i);
+        }
+
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            Vector3[] newVertices = (Vector3[])vertices.Clone();
+            foreach (var kvp in sharedVertices)
+            {
+                Vector3 pos = kvp.Key;
+                if (Mathf.Abs(pos.x - localBounds.max.x) < 0.1f || Mathf.Abs(pos.x - localBounds.min.x) < 0.1f ||
+                    Mathf.Abs(pos.y - localBounds.max.y) < 0.1f || Mathf.Abs(pos.y - localBounds.min.y) < 0.1f ||
+                    Mathf.Abs(pos.z - localBounds.max.z) < 0.1f || Mathf.Abs(pos.z - localBounds.min.z) < 0.1f)
+                {
+                    continue;
+                }
+
+                Vector3 sum = Vector3.zero;
+                foreach (int index in kvp.Value) sum += vertices[index];
+                Vector3 average = sum / kvp.Value.Count;
+
+                foreach (int index in kvp.Value) newVertices[index] = Vector3.Lerp(vertices[index], average, 0.5f);
+            }
+            vertices = newVertices;
+        }
     }
 
     private void SpawnDebris(Node node)

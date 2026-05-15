@@ -599,16 +599,16 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::FEMDestruction
   femCompute: {fileID: 7200000, guid: 7805643ff4959cf4dbd2d7b044135cb0, type: 3}
   debrisPrefab: {fileID: 119512, guid: 5578b82f17c954843901e8b68ca21dcc, type: 3}
-  vertexJitterAmount: 0.5
+  vertexJitterAmount: 1
+  meshSmoothingIterations: 1
   nodeResolution: {x: 30, y: 30, z: 5}
   anchorBottomToGround: 1
   anchorSidesToWalls: 0
-  maxDeformationDistance: 0.1
+  maxDeformationDistance: 0.05
   stiffness: 5000
-  damping: 20
+  damping: 15
   yieldStress: 500
-  minRequiredNeighbors: 2
-  impactForceMultiplier: 10
+  impactForceMultiplier: 1
   projectileTag: Cannonball
 --- !u!1001 &8020139810614280795
 PrefabInstance:

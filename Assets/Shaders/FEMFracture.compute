@@ -13,6 +13,7 @@ struct Node
     float stress;
     int isBroken;
     int isAnchor;
+    int anchorDistance; // NEW: Topological distance to the ground
 };
 
 struct OutputTriangle
@@ -26,7 +27,6 @@ AppendStructuredBuffer<OutputTriangle> _WallTriangles;
 RWStructuredBuffer<OutputTriangle> _WallTrianglesRW;
 
 float _DeltaTime, _Stiffness, _Damping, _YieldStress, _MaxDisplacement;
-int _MinNeighbors; // NEW: The structural failure threshold
 int3 _GridResolution;
 float3 _NodeSpacing;
 
@@ -142,8 +142,7 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
 
     float3 totalForce = float3(0, 0, 0);
     float localStress = 0.0;
-    float energySink = 1.0;
-    int unbrokenNeighbors = 0;
+    int minNeighborDistance = 999999;
 
     int3 offsets[6] = { int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0), int3(0, -1, 0), int3(0, 0, 1), int3(0, 0, -1) };
     float maxStretch = length(_NodeSpacing) * 0.5;
@@ -151,34 +150,46 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
     for (int i = 0; i < 6; i++)
     {
         int neighborIndex = GetIndex(int3(id.x, id.y, id.z) + offsets[i]);
-        if (neighborIndex != -1)
+        if (neighborIndex != -1 && _Nodes[neighborIndex].isBroken == 0)
         {
-            if (_Nodes[neighborIndex].isBroken == 0)
+            // Find the shortest path to an anchor
+            minNeighborDistance = min(minNeighborDistance, _Nodes[neighborIndex].anchorDistance);
+
+            float3 currentDir = _Nodes[neighborIndex].position - _Nodes[index].position;
+            float3 restDir = _Nodes[neighborIndex].restPosition - _Nodes[index].restPosition;
+            
+            float currentDist = length(currentDir);
+            float restDist = length(restDir);
+            
+            if (currentDist > 0.0001f)
             {
-                unbrokenNeighbors++;
-                float3 currentDir = _Nodes[neighborIndex].position - _Nodes[index].position;
-                float3 restDir = _Nodes[neighborIndex].restPosition - _Nodes[index].restPosition;
-                
-                float currentDist = length(currentDir);
-                float restDist = length(restDir);
-                
-                if (currentDist > 0.0001f)
-                {
-                    float displacement = clamp(currentDist - restDist, -maxStretch, maxStretch);
-                    float3 forceDir = currentDir / currentDist;
-                    totalForce += forceDir * (displacement * _Stiffness);
-                    localStress += abs(displacement);
-                }
+                float displacement = clamp(currentDist - restDist, -maxStretch, maxStretch);
+                float3 forceDir = currentDir / currentDist;
+                totalForce += forceDir * (displacement * _Stiffness);
+                localStress += abs(displacement);
             }
-            else
-                energySink *= 0.3;
         }
     }
 
-    // STRUCTURAL FIX: If the node has fewer neighbors than required, and it isn't an anchor, it fails.
-    if (unbrokenNeighbors < _MinNeighbors && _Nodes[index].isAnchor == 0)
+    // THE TOPOLOGY ALGORITHM
+    if (_Nodes[index].isAnchor == 1)
     {
-        _Nodes[index].stress = _YieldStress + 1000.0; // Force immediate break
+        _Nodes[index].anchorDistance = 0; // Anchors are distance 0
+    }
+    else
+    {
+        // I am 1 hop further away than my closest connected neighbor
+        _Nodes[index].anchorDistance = min(minNeighborDistance + 1, 999999);
+    }
+
+    // The maximum possible physical hops across the entire grid
+    int maxValidDistance = _GridResolution.x + _GridResolution.y + _GridResolution.z;
+
+    // If my distance exceeds the physical limits of the grid, it means I am trapped in an infinite 
+    // counting loop with other floating nodes. I am an island, so I must shatter.
+    if (_Nodes[index].anchorDistance > maxValidDistance)
+    {
+        _Nodes[index].stress = _YieldStress + 1000.0;
     }
     else
     {
@@ -187,7 +198,6 @@ void CalculateStress(uint3 id : SV_DispatchThreadID)
 
     totalForce -= _Nodes[index].velocity * _Damping;
     _Nodes[index].velocity += totalForce * _DeltaTime;
-    _Nodes[index].velocity *= energySink;
     
     float maxVel = 25.0;
     if (length(_Nodes[index].velocity) > maxVel)
