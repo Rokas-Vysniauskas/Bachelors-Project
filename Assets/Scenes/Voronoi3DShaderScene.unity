@@ -504,6 +504,10 @@ PrefabInstance:
     serializedVersion: 3
     m_TransformParent: {fileID: 0}
     m_Modifications:
+    - target: {fileID: 1443081786160720780, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
+      propertyPath: m_Mass
+      value: 10000
+      objectReference: {fileID: 0}
     - target: {fileID: 4451612990180345884, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
       propertyPath: m_Enabled
       value: 0
@@ -516,6 +520,10 @@ PrefabInstance:
       propertyPath: m_Name
       value: Wall_Voronoi
       objectReference: {fileID: 0}
+    - target: {fileID: 7208173571863468249, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
+      propertyPath: m_Material
+      value: 
+      objectReference: {fileID: 13400000, guid: 28e15d1211219f547ba0a6a521b56382, type: 2}
     - target: {fileID: 7512431652746076769, guid: c9368385da9a11843b6c7bd02e4967c3, type: 3}
       propertyPath: m_LocalPosition.x
       value: 0
@@ -590,7 +598,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::VoronoiDestruction
   voronoiCompute: {fileID: 7200000, guid: a58d7eaa19e1ed640af58a6d9b5a0495, type: 3}
-  pieceCount: 225
+  pieceCount: 300
   impactBias: 1
   explosionForce: 100
   explosionRadius: 1

@@ -558,7 +558,7 @@ PrefabInstance:
       objectReference: {fileID: 13400000, guid: 28e15d1211219f547ba0a6a521b56382, type: 2}
     - target: {fileID: 8756559172382686110, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
       propertyPath: m_Mass
-      value: 3000
+      value: 10000
       objectReference: {fileID: 0}
     - target: {fileID: 8756559172382686110, guid: 99af50ba9be5f9b4fa285a5db1650da3, type: 3}
       propertyPath: m_Constraints
@@ -594,8 +594,8 @@ MonoBehaviour:
   wallNormal: {x: 0, y: 0, z: 1}
   impactRadius: 4
   focus: 2.5
-  cylinderSlices: 7
-  radialSlices: 40
+  cylinderSlices: 11
+  radialSlices: 60
   coreSlices: 6
   planeChaos: 1
   extraCrossCuts: 3

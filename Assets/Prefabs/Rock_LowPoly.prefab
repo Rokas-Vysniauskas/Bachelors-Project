@@ -14,7 +14,7 @@ GameObject:
   - component: {fileID: 1981592646914595349}
   - component: {fileID: 6312697200364001736}
   m_Layer: 0
-  m_Name: Rock Type2 04
+  m_Name: Rock_LowPoly
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
