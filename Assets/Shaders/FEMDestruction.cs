@@ -21,8 +21,12 @@ public class FEMDestruction : MonoBehaviour
     [Tooltip("The Anti-Aliasing effect running on the GPU. 0 = Minecraft blocks. 100 = Completely melted, smooth concrete slopes.")]
     [Range(0f, 100f)] public float craterEdgeSmoothing = 60f;
 
+    [Header("Performance")]
+    [Tooltip("How many pieces of rubble the CPU is allowed to spawn in a single frame. Prevents massive lag spikes on impact.")]
+    public int maxDebrisSpawnsPerFrame = 50;
+
     [Header("FEM Resolution")]
-    [Tooltip("How many nodes to generate. Higher numbers mean smaller debris but demand more GPU power.")]
+    [Tooltip("How many nodes to generate. Higher numbers mean smaller debris but demand more CPU/GPU power.")]
     public Vector3Int nodeResolution = new Vector3Int(40, 40, 6);
 
     [Header("Structural Integrity")]
@@ -47,14 +51,13 @@ public class FEMDestruction : MonoBehaviour
     [Tooltip("Only break the wall if hit by an object with this tag.")]
     public string projectileTag = "Cannonball";
 
-    // Matches the layout in the HLSL Compute Shader
     [StructLayout(LayoutKind.Sequential)]
     private struct Node
     {
         public Vector3 position, restPosition, velocity;
         public float stress;
         public int isBroken, isAnchor;
-        public int anchorDistance; // Topological distance to the ground
+        public int anchorDistance;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -83,9 +86,11 @@ public class FEMDestruction : MonoBehaviour
     private GameObject proceduralWallObj;
     private Mesh proceduralMesh;
 
+    // The Queue that holds chunks waiting to be spawned as physics objects
+    private Queue<Node> debrisSpawnQueue = new Queue<Node>();
+
     private void Start()
     {
-        // Extract bounds from the visual mesh and secure the Rigidbody
         localBounds = GetComponent<MeshFilter>().sharedMesh.bounds;
         Rigidbody rb = GetComponent<Rigidbody>();
         if (rb != null) rb.isKinematic = true;
@@ -128,7 +133,7 @@ public class FEMDestruction : MonoBehaviour
                         stress = 0f,
                         isBroken = 0,
                         isAnchor = isAnchored,
-                        anchorDistance = 0 // All nodes start at 0 to prevent frame-1 topological explosions
+                        anchorDistance = 0
                     };
                 }
             }
@@ -137,7 +142,7 @@ public class FEMDestruction : MonoBehaviour
         nodeBuffer = new ComputeBuffer(totalNodes, Marshal.SizeOf(typeof(Node)));
         nodeBuffer.SetData(initialNodes);
 
-        maxTriangles = totalNodes * 12; // Absolute max triangles for a full voxel grid
+        maxTriangles = totalNodes * 12;
         triangleBuffer = new ComputeBuffer(maxTriangles, Marshal.SizeOf(typeof(OutputTriangle)), ComputeBufferType.Append);
 
         kernelApplyImpact = femCompute.FindKernel("ApplyImpact");
@@ -191,6 +196,14 @@ public class FEMDestruction : MonoBehaviour
     {
         if (nodeBuffer == null) return;
         RequestPhysicsReadback();
+
+        // Time-Sliced Debris Spawning to prevent FPS drops
+        int spawnsThisFrame = 0;
+        while (debrisSpawnQueue.Count > 0 && spawnsThisFrame < maxDebrisSpawnsPerFrame)
+        {
+            SpawnDebris(debrisSpawnQueue.Dequeue());
+            spawnsThisFrame++;
+        }
     }
 
     private void DispatchComputeShader()
@@ -242,12 +255,11 @@ public class FEMDestruction : MonoBehaviour
         {
             Node node = localNodeData[i];
 
-            // If the GPU marked this node as newly broken (1)
             if (node.isBroken == 1)
             {
-                SpawnDebris(node);
+                // Add broken node to the queue instead of instantly spawning
+                debrisSpawnQueue.Enqueue(node);
 
-                // Mark as processed (2) so we don't spawn debris for it again
                 Node updatedNode = node;
                 updatedNode.isBroken = 2;
                 localNodeData[i] = updatedNode;
@@ -270,22 +282,17 @@ public class FEMDestruction : MonoBehaviour
     {
         isMeshReadbackPending = true;
 
-        // 1. Wipe the GPU buffer clean to prevent ghost triangles
         femCompute.SetBuffer(kernelClearMesh, "_WallTrianglesRW", triangleBuffer);
         femCompute.SetInt("_MaxTriangles", maxTriangles);
         femCompute.Dispatch(kernelClearMesh, Mathf.CeilToInt(maxTriangles / 64f), 1, 1);
 
-        // 2. Reset Append Counter
         triangleBuffer.SetCounterValue(0);
 
-        // 3. Send rendering variables
         femCompute.SetFloat("_JitterAmount", vertexJitterAmount);
         femCompute.SetFloat("_EdgeSmoothing", craterEdgeSmoothing / 100f);
 
-        // 4. Generate the mesh purely on the GPU
         femCompute.Dispatch(kernelGenerateMesh, threadGroups.x, threadGroups.y, threadGroups.z);
 
-        // 5. Read back the final geometry
         AsyncGPUReadback.Request(triangleBuffer, OnMeshReadbackComplete);
     }
 
@@ -297,8 +304,6 @@ public class FEMDestruction : MonoBehaviour
             return;
         }
 
-        // PERFORMANCE FIX: Iterate directly over the NativeArray!
-        // Calling .ToArray() was allocating massive amounts of RAM and causing the stutter.
         NativeArray<OutputTriangle> gpuTriangles = request.GetData<OutputTriangle>();
         int triangleCount = gpuTriangles.Length;
 
@@ -372,8 +377,6 @@ public class FEMDestruction : MonoBehaviour
     private void SpawnDebris(Node node)
     {
         if (debrisPrefab == null) return;
-
-        // Prevent GPU Math errors from crashing Unity
         if (float.IsNaN(node.position.x) || float.IsNaN(node.velocity.x)) return;
 
         Quaternion randomRot = Quaternion.Euler(Random.Range(0, 360), Random.Range(0, 360), Random.Range(0, 360));
