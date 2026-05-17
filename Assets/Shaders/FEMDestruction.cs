@@ -22,12 +22,20 @@ public class FEMDestruction : MonoBehaviour
     [Range(0f, 100f)] public float craterEdgeSmoothing = 60f;
 
     [Header("Performance")]
+    [Tooltip("Toggle this off to completely disable debris spawning for performance testing.")]
+    public bool enableDebrisSpawning = true;
     [Tooltip("How many pieces of rubble the CPU is allowed to spawn in a single frame. Prevents massive lag spikes on impact.")]
     public int maxDebrisSpawnsPerFrame = 50;
 
     [Header("FEM Resolution")]
     [Tooltip("How many nodes to generate. Higher numbers mean smaller debris but demand more CPU/GPU power.")]
     public Vector3Int nodeResolution = new Vector3Int(40, 40, 6);
+
+    [Header("Physics Auto-Scaling")]
+    [Tooltip("Automatically adjusts stiffness and damping when you change resolution, preventing physics explosions.")]
+    public bool autoScalePhysics = true;
+    [Tooltip("The resolution where your current Stiffness and Damping feel perfectly tuned.")]
+    public Vector3Int baselineResolution = new Vector3Int(30, 30, 5);
 
     [Header("Structural Integrity")]
     [Tooltip("Bolts the bottom row of nodes to the ground so the wall has a foundation.")]
@@ -72,6 +80,7 @@ public class FEMDestruction : MonoBehaviour
     private int kernelApplyImpact, kernelCalculateStress, kernelIntegrate, kernelGenerateMesh, kernelClearMesh;
     private Vector3Int threadGroups;
     private Vector3 calculatedNodeSpacing;
+    private float physicsScaleFactor = 1.0f;
 
     private bool hasImpactThisFrame = false;
     private Vector3 currentImpactPoint, currentImpactVelocity;
@@ -86,7 +95,6 @@ public class FEMDestruction : MonoBehaviour
     private GameObject proceduralWallObj;
     private Mesh proceduralMesh;
 
-    // The Queue that holds chunks waiting to be spawned as physics objects
     private Queue<Node> debrisSpawnQueue = new Queue<Node>();
 
     private void Start()
@@ -108,6 +116,13 @@ public class FEMDestruction : MonoBehaviour
             localBounds.size.y / Mathf.Max(1, nodeResolution.y),
             localBounds.size.z / Mathf.Max(1, nodeResolution.z)
         );
+
+        Vector3 baseSpacing = new Vector3(
+            localBounds.size.x / Mathf.Max(1, baselineResolution.x),
+            localBounds.size.y / Mathf.Max(1, baselineResolution.y),
+            localBounds.size.z / Mathf.Max(1, baselineResolution.z)
+        );
+        physicsScaleFactor = calculatedNodeSpacing.magnitude / baseSpacing.magnitude;
 
         Vector3 originOffset = localBounds.min + (calculatedNodeSpacing / 2f);
 
@@ -197,20 +212,29 @@ public class FEMDestruction : MonoBehaviour
         if (nodeBuffer == null) return;
         RequestPhysicsReadback();
 
-        // Time-Sliced Debris Spawning to prevent FPS drops
-        int spawnsThisFrame = 0;
-        while (debrisSpawnQueue.Count > 0 && spawnsThisFrame < maxDebrisSpawnsPerFrame)
+        if (enableDebrisSpawning)
         {
-            SpawnDebris(debrisSpawnQueue.Dequeue());
-            spawnsThisFrame++;
+            int spawnsThisFrame = 0;
+            while (debrisSpawnQueue.Count > 0 && spawnsThisFrame < maxDebrisSpawnsPerFrame)
+            {
+                SpawnDebris(debrisSpawnQueue.Dequeue());
+                spawnsThisFrame++;
+            }
+        }
+        else
+        {
+            debrisSpawnQueue.Clear();
         }
     }
 
     private void DispatchComputeShader()
     {
+        float finalStiffness = autoScalePhysics ? stiffness * physicsScaleFactor : stiffness;
+        float finalDamping = autoScalePhysics ? damping * physicsScaleFactor : damping;
+
         femCompute.SetFloat("_DeltaTime", Time.fixedDeltaTime);
-        femCompute.SetFloat("_Stiffness", stiffness);
-        femCompute.SetFloat("_Damping", damping);
+        femCompute.SetFloat("_Stiffness", finalStiffness);
+        femCompute.SetFloat("_Damping", finalDamping);
         femCompute.SetFloat("_YieldStress", yieldStress);
         femCompute.SetFloat("_MaxDisplacement", maxDeformationDistance);
 
@@ -257,8 +281,10 @@ public class FEMDestruction : MonoBehaviour
 
             if (node.isBroken == 1)
             {
-                // Add broken node to the queue instead of instantly spawning
-                debrisSpawnQueue.Enqueue(node);
+                if (enableDebrisSpawning)
+                {
+                    debrisSpawnQueue.Enqueue(node);
+                }
 
                 Node updatedNode = node;
                 updatedNode.isBroken = 2;
@@ -379,6 +405,7 @@ public class FEMDestruction : MonoBehaviour
         if (debrisPrefab == null) return;
         if (float.IsNaN(node.position.x) || float.IsNaN(node.velocity.x)) return;
 
+        // Standard Instantiate on the main thread
         Quaternion randomRot = Quaternion.Euler(Random.Range(0, 360), Random.Range(0, 360), Random.Range(0, 360));
         GameObject debris = Instantiate(debrisPrefab, node.position, randomRot);
 

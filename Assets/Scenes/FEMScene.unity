@@ -601,8 +601,11 @@ MonoBehaviour:
   debrisPrefab: {fileID: 119512, guid: 5578b82f17c954843901e8b68ca21dcc, type: 3}
   vertexJitterAmount: 1
   craterEdgeSmoothing: 100
-  maxDebrisSpawnsPerFrame: 50
+  enableDebrisSpawning: 1
+  maxDebrisSpawnsPerFrame: 100
   nodeResolution: {x: 30, y: 30, z: 5}
+  autoScalePhysics: 1
+  baselineResolution: {x: 30, y: 30, z: 5}
   anchorBottomToGround: 1
   anchorSidesToWalls: 0
   maxDeformationDistance: 0.6
