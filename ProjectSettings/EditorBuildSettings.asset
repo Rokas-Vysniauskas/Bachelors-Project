@@ -24,8 +24,14 @@ EditorBuildSettings:
     path: Assets/Scenes/RadialMeshSlicingScene.unity
     guid: a735107148a22e24fabc061731287242
   - enabled: 1
-    path: Assets/Scenes/FEMScene.unity
+    path: Assets/Scenes/FEM(30x30)Scene.unity
     guid: dcbb9706272ec554b9b405d06db39c80
+  - enabled: 1
+    path: Assets/Scenes/FEM(60x60)Scene.unity
+    guid: 7e5a8380ee3d42142a94a4a3fd66cbf6
+  - enabled: 1
+    path: Assets/Scenes/FEM(90x90)Scene.unity
+    guid: f1d7a92a93bca7f418755e2c577db4bf
   m_configObjects:
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
   m_UseUCBPForAssetBundles: 0
