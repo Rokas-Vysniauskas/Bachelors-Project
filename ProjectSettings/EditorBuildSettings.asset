@@ -8,13 +8,13 @@ EditorBuildSettings:
   - enabled: 1
     path: Assets/Scenes/MasterScene.unity
     guid: 99c9720ab356a0642a771bea13969a05
-  - enabled: 0
+  - enabled: 1
     path: Assets/Scenes/PrefracturedScene.unity
     guid: a1cc9c9980ea4744f8c14e568b4a9c88
-  - enabled: 0
+  - enabled: 1
     path: Assets/Scenes/VoronoiScene.unity
     guid: 3738e0ec14f07504288179ead8c0c813
-  - enabled: 0
+  - enabled: 1
     path: Assets/Scenes/MeshSlicingScene.unity
     guid: dd449510e6a2a314796264a9aef748bb
   - enabled: 1

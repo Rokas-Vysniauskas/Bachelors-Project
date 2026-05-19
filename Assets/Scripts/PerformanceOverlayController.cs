@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
@@ -7,7 +8,6 @@ using UnityEngine.InputSystem;
 using TMPro;
 using Unity.Profiling;
 using System.Text;
-using System.Linq;
 
 /// <summary>
 /// Passive performance monitor. 
@@ -31,9 +31,9 @@ public class PerformanceOverlayController : MonoBehaviour
     public int sampleSize = 1000;
 
     [Header("Geometry Settings")]
-    [Tooltip("If true, only counts objects with the specified tag. If false, counts ALL geometry in the additive scene (catches untagged shards).")]
+    [Tooltip("If true, only counts objects with the specified tag. If false, counts ALL geometry in the additive scene.")]
     public bool useTagFilter = false;
-    [Tooltip("Tag to search for geometry calculations (e.g., Destructible walls). Only used if 'Use Tag Filter' is true.")]
+    [Tooltip("Tag to search for geometry calculations (e.g., Destructible walls).")]
     public string targetTag = "Destructible";
     [Tooltip("How often to recalculate geometry (in seconds). Set to 0 to disable auto-refresh.")]
     public float geometryRefreshRate = 5.0f;
@@ -51,8 +51,11 @@ public class PerformanceOverlayController : MonoBehaviour
     private ProfilerRecorder _mainThreadTimeRecorder;
     private ProfilerRecorder _gpuFrameTimeRecorder;
 
-    // --- Metrics Storage ---
-    private List<float> _frameTimes = new List<float>();
+    // --- Metrics Storage (Zero Allocation Circular Buffer) ---
+    private float[] _frameTimes;
+    private int _frameIndex = 0;
+    private int _frameCount = 0;
+
     private long _currentSceneTriangles = 0;
     private long _currentSceneVertices = 0;
 
@@ -65,7 +68,6 @@ public class PerformanceOverlayController : MonoBehaviour
 
     void OnEnable()
     {
-        // Initialize Profiler Recorders (Low overhead, Unity 2022/6+ standard)
         _totalReservedMemoryRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "Total Reserved Memory");
         _gcReservedMemoryRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Reserved Memory");
         _textureMemoryRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "Texture Memory");
@@ -74,10 +76,8 @@ public class PerformanceOverlayController : MonoBehaviour
 
         SceneManager.sceneLoaded += OnSceneLoaded;
 
-        // Ensure UI is visible when this component is enabled
         if (mainCanvas != null) mainCanvas.gameObject.SetActive(true);
 
-        // Immediate update in case we were enabled mid-game
         if (SceneManager.GetActiveScene().isLoaded)
         {
             _currentSceneName = SceneManager.GetActiveScene().name;
@@ -87,7 +87,6 @@ public class PerformanceOverlayController : MonoBehaviour
 
     void OnDisable()
     {
-        // Clean up recorders to stop overhead
         _totalReservedMemoryRecorder.Dispose();
         _gcReservedMemoryRecorder.Dispose();
         _textureMemoryRecorder.Dispose();
@@ -96,19 +95,18 @@ public class PerformanceOverlayController : MonoBehaviour
 
         SceneManager.sceneLoaded -= OnSceneLoaded;
 
-        // Hide UI when this component is disabled
         if (mainCanvas != null) mainCanvas.gameObject.SetActive(false);
     }
 
     void OnDestroy()
     {
-        // If the script is destroyed, destroy the canvas we created
         if (mainCanvas != null) Destroy(mainCanvas.gameObject);
     }
 
     void Start()
     {
         EnsureUI();
+        _frameTimes = new float[sampleSize];
     }
 
     void Update()
@@ -123,8 +121,13 @@ public class PerformanceOverlayController : MonoBehaviour
         float dt = Time.unscaledDeltaTime;
         float dtMs = dt * 1000.0f;
 
-        if (_frameTimes.Count >= sampleSize) _frameTimes.RemoveAt(0);
-        _frameTimes.Add(dtMs);
+        // Write to array and wrap around for zero-allocation
+        if (_frameTimes != null && _frameTimes.Length > 0)
+        {
+            _frameTimes[_frameIndex] = dtMs;
+            _frameIndex = (_frameIndex + 1) % sampleSize;
+            if (_frameCount < sampleSize) _frameCount++;
+        }
 
         // 2. Update Memory Stats
         UpdateMemoryStats();
@@ -144,7 +147,7 @@ public class PerformanceOverlayController : MonoBehaviour
         _uiTimer += Time.unscaledDeltaTime;
         if (_uiTimer >= uiRefreshRate)
         {
-            UpdateUI(dtMs); // Pass current frame ms explicitly for real-time display
+            UpdateUI(dtMs);
             _uiTimer = 0;
         }
     }
@@ -153,7 +156,8 @@ public class PerformanceOverlayController : MonoBehaviour
 
     public void ResetStats()
     {
-        _frameTimes.Clear();
+        _frameIndex = 0;
+        _frameCount = 0;
 
         _ramMin = long.MaxValue; _ramMax = 0;
         _ramAvgSum = 0; _ramSampleCount = 0;
@@ -161,7 +165,6 @@ public class PerformanceOverlayController : MonoBehaviour
         _vramMin = long.MaxValue; _vramMax = 0;
         _vramAvgSum = 0; _vramSampleCount = 0;
 
-        // Trigger an immediate UI refresh to show cleared stats (optional)
         _uiTimer = uiRefreshRate;
     }
 
@@ -169,10 +172,7 @@ public class PerformanceOverlayController : MonoBehaviour
 
     void OnSceneLoaded(Scene scene, LoadSceneMode mode)
     {
-        // We assume the MasterScene is persistent and any NEW scene loading is the "content"
         _currentSceneName = scene.name;
-
-        // Immediate calculation on load
         CalculateDestructibleGeometry();
         _geometryTimer = 0;
     }
@@ -184,7 +184,6 @@ public class PerformanceOverlayController : MonoBehaviour
         _currentSceneTriangles = 0;
         _currentSceneVertices = 0;
 
-        // METHOD 1: Filter by Tag (Original Method)
         if (useTagFilter)
         {
             if (string.IsNullOrEmpty(targetTag)) return;
@@ -201,13 +200,10 @@ public class PerformanceOverlayController : MonoBehaviour
 
             foreach (var obj in targets)
             {
-                // Strict check: only count objects in the Additive Scene
                 if (obj.scene.name != _currentSceneName && _currentSceneName != "Waiting...") continue;
-
                 CountObjectGeometry(obj);
             }
         }
-        // METHOD 2: Scan Additive Scene Roots (Catches untagged shards)
         else
         {
             if (_currentSceneName == "Waiting...") return;
@@ -225,14 +221,11 @@ public class PerformanceOverlayController : MonoBehaviour
 
     void CountObjectGeometry(GameObject obj)
     {
-        // CHANGED: Passed 'false' to GetComponentsInChildren to only include Active objects.
-        // This ensures stats reflect the current scene state (e.g. after a wall fractures and shards enable).
         MeshFilter[] meshFilters = obj.GetComponentsInChildren<MeshFilter>(false);
         foreach (var mf in meshFilters)
         {
             if (mf.sharedMesh != null)
             {
-                // Using GetIndexCount allows access on non-readable meshes
                 for (int i = 0; i < mf.sharedMesh.subMeshCount; i++)
                 {
                     _currentSceneTriangles += (mf.sharedMesh.GetIndexCount(i) / 3);
@@ -241,7 +234,6 @@ public class PerformanceOverlayController : MonoBehaviour
             }
         }
 
-        // CHANGED: Passed 'false' here as well for consistency.
         SkinnedMeshRenderer[] skinnedMeshes = obj.GetComponentsInChildren<SkinnedMeshRenderer>(false);
         foreach (var smr in skinnedMeshes)
         {
@@ -265,13 +257,11 @@ public class PerformanceOverlayController : MonoBehaviour
         long currentRam = _totalReservedMemoryRecorder.LastValue / (1024 * 1024);
         long currentVram = _textureMemoryRecorder.LastValue / (1024 * 1024);
 
-        // RAM Stats
         if (currentRam < _ramMin) _ramMin = currentRam;
         if (currentRam > _ramMax) _ramMax = currentRam;
         _ramAvgSum += currentRam;
         _ramSampleCount++;
 
-        // VRAM Stats
         if (currentVram < _vramMin) _vramMin = currentVram;
         if (currentVram > _vramMax) _vramMax = currentVram;
         _vramAvgSum += currentVram;
@@ -280,33 +270,44 @@ public class PerformanceOverlayController : MonoBehaviour
 
     void UpdateUI(float currentDtMs)
     {
-        if (_frameTimes.Count == 0) return;
+        if (_frameCount == 0) return;
+
+        // Create a temporary array to sort so we don't mess up the circular buffer
+        float[] sortedTimes = new float[_frameCount];
+        Array.Copy(_frameTimes, sortedTimes, _frameCount);
+        Array.Sort(sortedTimes); // In-place sort, zero garbage allocation
 
         // --- FPS Calculations ---
         float currentFps = 1000.0f / (currentDtMs > 0 ? currentDtMs : 0.001f);
-        float avgFrameTime = _frameTimes.Average();
 
-        // Sort for Min/Max/1% Low
-        var sortedTimes = _frameTimes.OrderBy(t => t).ToList();
+        float sumAll = 0f;
+        for (int i = 0; i < _frameCount; i++) sumAll += sortedTimes[i];
+        float avgFrameTime = sumAll / _frameCount;
 
-        // 1% Low FPS = Frame Time High (Slowest frames)
-        int index1Percent = Mathf.FloorToInt(sortedTimes.Count * 0.99f);
-        if (index1Percent >= sortedTimes.Count) index1Percent = sortedTimes.Count - 1;
-        float frameTime1PercentLow = sortedTimes[index1Percent];
+        // 1% Low FPS = AVERAGE of the slowest 1% of frames
+        int onePercentCount = Mathf.Max(1, Mathf.FloorToInt(_frameCount * 0.01f));
+        float sumWorst = 0f;
+
+        // The slowest frames are at the end of the ascending sorted array
+        for (int i = _frameCount - onePercentCount; i < _frameCount; i++)
+        {
+            sumWorst += sortedTimes[i];
+        }
+        float frameTime1PercentLow = sumWorst / onePercentCount;
 
         // Frame Time Min (Fastest frame)
         float frameTimeMin = sortedTimes[0];
 
         // FPS Metrics
         float fpsMax = 1000.0f / (frameTimeMin > 0 ? frameTimeMin : 0.001f);
-        float fpsAvg = 1000.0f / avgFrameTime;
-        float fps1PercentLow = 1000.0f / frameTime1PercentLow;
+        float fpsAvg = 1000.0f / (avgFrameTime > 0 ? avgFrameTime : 0.001f);
+        float fps1PercentLow = 1000.0f / (frameTime1PercentLow > 0 ? frameTime1PercentLow : 0.001f);
 
         // --- Hardware Usage ---
         double cpuTimeMs = _mainThreadTimeRecorder.Valid ? _mainThreadTimeRecorder.LastValue * (1e-6f) : 0;
         double gpuTimeMs = _gpuFrameTimeRecorder.Valid ? _gpuFrameTimeRecorder.LastValue * (1e-6f) : 0;
 
-        float targetMs = 16.66f; // 60 FPS standard for % calc
+        float targetMs = 16.66f;
         float cpuLoad = (float)(cpuTimeMs / targetMs) * 100f;
         float gpuLoad = (float)(gpuTimeMs / targetMs) * 100f;
 
@@ -350,24 +351,20 @@ public class PerformanceOverlayController : MonoBehaviour
             GameObject canvasObj = new GameObject("PerformanceCanvas");
             mainCanvas = canvasObj.AddComponent<Canvas>();
             mainCanvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            mainCanvas.sortingOrder = 999; // Ensure it's on top
+            mainCanvas.sortingOrder = 999;
             canvasObj.AddComponent<CanvasScaler>();
             canvasObj.AddComponent<GraphicRaycaster>();
-            DontDestroyOnLoad(canvasObj); // Keep across scene loads if MasterScene isn't persistent
+            DontDestroyOnLoad(canvasObj);
         }
 
         if (statsText == null)
         {
-            // 1. Create Background Container (Parent) - Controls size and rendering order
-            // The Background is the PARENT, so it draws FIRST (behind text).
             GameObject bgObj = new GameObject("StatsBackground");
             bgObj.transform.SetParent(mainCanvas.transform, false);
 
             Image bg = bgObj.AddComponent<Image>();
-            bg.color = new Color(0, 0, 0, 0.5f); // Semi-transparent grey
+            bg.color = new Color(0, 0, 0, 0.5f);
 
-            // 2. Add Layout Components to Auto-Size Background to Text
-            // This forces the background to hug the text content + padding.
             VerticalLayoutGroup layout = bgObj.AddComponent<VerticalLayoutGroup>();
             layout.padding = new RectOffset(10, 10, 10, 10);
             layout.childControlWidth = true;
@@ -379,14 +376,12 @@ public class PerformanceOverlayController : MonoBehaviour
             csf.horizontalFit = ContentSizeFitter.FitMode.PreferredSize;
             csf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
-            // 3. Position Top-Left
             RectTransform bgRt = bgObj.GetComponent<RectTransform>();
-            bgRt.anchorMin = new Vector2(0, 1); // Top Left
-            bgRt.anchorMax = new Vector2(0, 1); // Top Left
-            bgRt.pivot = new Vector2(0, 1);     // Pivot Top Left
-            bgRt.anchoredPosition = new Vector2(10, -10); // Slight offset from corner
+            bgRt.anchorMin = new Vector2(0, 1);
+            bgRt.anchorMax = new Vector2(0, 1);
+            bgRt.pivot = new Vector2(0, 1);
+            bgRt.anchoredPosition = new Vector2(10, -10);
 
-            // 4. Create Text Object (Child of Background)
             GameObject textObj = new GameObject("StatsText");
             textObj.transform.SetParent(bgObj.transform, false);
 
